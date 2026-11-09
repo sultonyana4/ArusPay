@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { PrivyProvider, useExportWallet, useLinkAccount, useLogin, usePrivy, useWallets } from '@privy-io/react-auth';
 import { defineChain } from 'viem';
-import { selectWalletsForOnchainSync } from './privy-wallets.js';
+import { selectWalletsForOnchainSync, waitForConnectedEthereumProvider } from './privy-wallets.js';
 
 const ARC_RPC = import.meta.env.VITE_ARUSPAY_BROWSER_RPC_URL || 'https://rpc.blockdaemon.testnet.arc.io';
 const arcTestnet = defineChain({
@@ -19,9 +19,11 @@ const appId = import.meta.env.VITE_PRIVY_APP_ID || 'cmw96cg3m00c30hl5gg2jvnxa';
 function PrivyBridge() {
   const { login } = useLogin();
   const { authenticated, ready, user, logout } = usePrivy();
-  const { wallets } = useWallets();
+  const { wallets, ready: walletsAreReady } = useWallets();
   const walletsRef = useRef(wallets || []);
   walletsRef.current = wallets || [];
+  const walletsReadyRef = useRef(Boolean(walletsAreReady));
+  walletsReadyRef.current = Boolean(walletsAreReady);
   const { exportWallet } = useExportWallet();
   const { linkTwitter } = useLinkAccount({
     onSuccess: ({ user: linkedUser }) => {
@@ -115,21 +117,19 @@ function PrivyBridge() {
           window.arusPayAuthError?.('Sign-out could not be completed. Please try again.');
         }
       },
-      getEthereumProvider: async () => {
-        const deadline = Date.now() + 2000;
-        while (Date.now() < deadline) {
-          const wallet = walletsRef.current.find((item) => item.chainType === 'ethereum' || item.chainType === 'evm');
-          if (wallet?.getEthereumProvider) return wallet.getEthereumProvider();
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-        return window.ethereum || null;
-      },
+      getEthereumProvider: async ({ address, walletClientType } = {}) => waitForConnectedEthereumProvider({
+        getWallets: () => walletsRef.current,
+        isReady: () => walletsReadyRef.current,
+        address,
+        walletClientType,
+        fallbackProvider: window.ethereum,
+      }),
     };
 
     return () => {
       delete window.arusPayPrivy;
     };
-  }, [authenticated, exportWallet, linkTwitter, login, logout, wallets]);
+  }, [authenticated, exportWallet, linkTwitter, login, logout, wallets, walletsAreReady]);
 
   useEffect(() => {
     if (!ready) return;

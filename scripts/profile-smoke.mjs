@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { selectWalletsForOnchainSync } from '../src/privy-wallets.js';
+import { selectWalletsForOnchainSync, waitForConnectedEthereumProvider } from '../src/privy-wallets.js';
 
 const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
 const arcSyncSource = await readFile(new URL('../src/arc-invoices.js', import.meta.url), 'utf8');
@@ -12,9 +12,14 @@ assert.match(sharedInvoiceSource, /window\.arusPayApi\?\.openInvoice/, 'A valid 
 assert.doesNotMatch(sharedInvoiceSource, /await\s+getOnchainInvoice/, 'Payment-link selection must not wait for the chain before rendering the loading state.');
 assert.match(arcSyncSource, /requestId !== paymentRenderRequest/, 'Late RPC results must not overwrite a newer payment view.');
 assert.match(arcSyncSource, /Connect wallet to pay/, 'An invoice must show a wallet connection action without hiding its on-chain details.');
-assert.match(arcSyncSource, /Privy found your embedded wallet, but its secure signing connection is still loading/, 'A known Privy wallet without a ready provider must not be called disconnected.');
-assert.match(privyAuthSource, /walletsRef\.current\.find/, 'Provider lookup must use the latest Privy wallet list.');
-assert.match(privyAuthSource, /const deadline = Date\.now\(\) \+ 2000/, 'Provider lookup must briefly wait for Privy wallet restoration.');
+assert.match(arcSyncSource, /Privy recognizes this embedded wallet, but its connected provider is not available/, 'A linked wallet without an active provider must not be treated as a ready signer.');
+assert.match(arcSyncSource, /Retry Privy connection/, 'The read-only provider check must be separately retryable.');
+assert.match(arcSyncSource, /Signing has not been tested here/, 'A read-only provider probe must not claim that signing was tested.');
+assert.match(privyAuthSource, /ready: walletsAreReady/, 'Provider lookup must wait for Privy useWallets readiness.');
+assert.match(privyAuthSource, /waitForConnectedEthereumProvider/, 'Provider lookup must use the readiness-aware wallet helper.');
+assert.doesNotMatch(privyAuthSource, /Date\.now\(\) \+ 2000/, 'A fixed two-second wallet restoration window must not return early.');
+assert.ok(arcSyncSource.includes('paymentButton.disabled = true;'), 'Payment stays disabled until the Privy provider passes a read-only check.');
+assert.ok(arcSyncSource.includes("method: 'eth_chainId'"), 'The connection probe must be read-only.');
 const dom = new JSDOM(html, {
   url: 'https://aruspay.test/',
   runScripts: 'outside-only',
@@ -63,6 +68,66 @@ assert.equal(directWalletFallback[0]?.walletClientType, 'privy');
 assert.deepEqual(selectWalletsForOnchainSync([], { linkedAccounts: [{ address, walletClientType: 'metamask', chainType: 'ethereum' }] }), [], 'An untrusted linked external wallet is not used as an embedded fallback.');
 const activeExternalWallet = { address, walletClientType: 'metamask', chainType: 'ethereum' };
 assert.deepEqual(selectWalletsForOnchainSync([activeExternalWallet], user), [activeExternalWallet], 'An actively connected EVM wallet remains preferred for invoice sync.');
+
+const provider = { request: async ({ method }) => method === 'eth_chainId' ? '0x4ce2b2' : null };
+let providerWallets = [];
+let walletsAreReady = false;
+const providerWait = waitForConnectedEthereumProvider({
+  getWallets: () => providerWallets,
+  isReady: () => walletsAreReady,
+  address,
+  walletClientType: 'privy',
+  fallbackProvider: provider,
+  timeoutMs: 100,
+  retryIntervalMs: 2,
+});
+setTimeout(() => {
+  providerWallets = [{
+    ...wallets[0],
+    getEthereumProvider: async () => provider,
+  }];
+  walletsAreReady = true;
+}, 10);
+assert.equal(await providerWait, provider, 'A matching Privy provider is returned only after useWallets is ready.');
+
+const otherAddress = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+const otherWalletProvider = { request: async () => '0x1' };
+const selectedWalletProvider = await waitForConnectedEthereumProvider({
+  getWallets: () => [
+    { ...wallets[0], address: otherAddress, getEthereumProvider: async () => otherWalletProvider },
+    { ...wallets[0], getEthereumProvider: async () => provider },
+  ],
+  isReady: () => true,
+  address,
+  walletClientType: 'privy',
+  timeoutMs: 10,
+  retryIntervalMs: 2,
+});
+assert.equal(selectedWalletProvider, provider, 'The provider must match the selected embedded-wallet address, not just the first EVM wallet.');
+
+const unrelatedProvider = { request: async () => '0x1' };
+const noEmbeddedProvider = await waitForConnectedEthereumProvider({
+  getWallets: () => [],
+  isReady: () => true,
+  address,
+  walletClientType: 'privy',
+  fallbackProvider: unrelatedProvider,
+  timeoutMs: 10,
+  retryIntervalMs: 2,
+});
+assert.equal(noEmbeddedProvider, null, 'An embedded wallet must not silently fall back to an unrelated window.ethereum provider.');
+
+const externalProvider = await waitForConnectedEthereumProvider({
+  getWallets: () => [],
+  isReady: () => true,
+  address,
+  walletClientType: 'metamask',
+  fallbackProvider: unrelatedProvider,
+  timeoutMs: 10,
+  retryIntervalMs: 2,
+});
+assert.equal(externalProvider, unrelatedProvider, 'A non-embedded connected wallet can use the injected provider fallback.');
+
 window.arusPayAuthenticated(user, embeddedFallback);
 assert.equal(walletSyncCalls.at(-1)?.[0]?.address, address, 'The embedded fallback is passed to the Arc sync hook.');
 await new Promise((resolve) => setTimeout(resolve, 0));
@@ -184,5 +249,5 @@ assert.equal(linkDom.window.document.querySelector('#payment').classList.contain
 assert.equal(linkDom.window.arusPayApi.getSelectedInvoice().invoiceId, invoiceId, 'The linked invoice selection must survive sign-out.');
 linkDom.window.close();
 
-console.log('PASS: profile route, linked identities, copy address, local-only name, user isolation, X-link gating, export confirmation/cancel, embedded-wallet-only empty states, and payment-link routing across Privy session callbacks.');
+console.log('PASS: profile route, linked identities, copy actions, local-only name, user isolation, X-link gating, export confirmation/cancel, wallet provider readiness and fallback safety, embedded-wallet-only states, and payment-link routing.');
 dom.window.close();

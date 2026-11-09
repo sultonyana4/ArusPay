@@ -45,6 +45,7 @@ Set `VITE_PRIVY_APP_ID` in a local `.env` file to override the public Privy app 
 - `payInvoice(address,bytes32)` submits the exact invoice value as native USDC. The app validates the successful receipt and matching `InvoicePaid` event, then checks the contract state before showing the invoice as paid.
 - The connected wallet pays its own Arc Testnet USDC gas fees. No gas sponsorship, relayer, or token approval is used.
 - Payment state is read from Arc Testnet; a wallet prompt or local record alone is never treated as proof of payment.
+- A Privy linked wallet address is not treated as a connected signing provider. The app waits for Privy's `useWallets` readiness and checks the selected EIP-1193 provider with a read-only `eth_chainId` request; this confirms provider connectivity only, not signing capability.
 
 ## Profile and wallet recovery
 
@@ -55,7 +56,7 @@ Set `VITE_PRIVY_APP_ID` in a local `.env` file to override the public Privy app 
 - Private-key export is started only after the user confirms an on-screen safety warning, then handled by Privy's own export modal. ArusPay does not retrieve, receive, log, or store the private key. Anyone who obtains the key can control the wallet.
 - The profile flow performs no on-chain transactions.
 
-Run the safe profile smoke test with `npm run test:profile`. It exercises the UI in isolated JSDOM fixtures with mocked Privy methods, including account rendering, copy actions, local-only name storage, X-link gating, key-export confirmation/cancel, and empty states. It does not authenticate a real user, reveal a private key, or send transactions. Live X authorization and the Privy export modal should be verified from the account owner's own signed-in session.
+Run the safe profile smoke test with `npm run test:profile`. It exercises isolated JSDOM fixtures and mocked Privy methods, including wallet-provider readiness, correct embedded-wallet matching, safe external-provider fallback, account rendering, copy actions, local-only name storage, X-link gating, key-export confirmation/cancel, and empty states. It does not authenticate a real user, test signing, reveal a private key, or send transactions. Live Privy connection, X authorization, and the Privy export modal should be verified from the account owner's own signed-in session.
 
 The application must remain testnet-only until a separate, explicit mainnet launch decision and production review.
 

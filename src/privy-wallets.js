@@ -2,6 +2,10 @@ const EVM_CHAIN_TYPES = new Set(['ethereum', 'evm']);
 const PRIVY_WALLET_CLIENT_TYPES = new Set(['privy', 'privy-v2']);
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
+export function isPrivyWalletClientType(walletClientType) {
+  return PRIVY_WALLET_CLIENT_TYPES.has(walletClientType);
+}
+
 function isEvmWallet(wallet) {
   return Boolean(
     wallet &&
@@ -32,4 +36,55 @@ export function selectWalletsForOnchainSync(activeWallets, user) {
     seenAddresses.add(address);
     return true;
   });
+}
+
+export async function waitForConnectedEthereumProvider({
+  getWallets,
+  isReady,
+  address,
+  walletClientType,
+  fallbackProvider,
+  timeoutMs = 12_000,
+  retryIntervalMs = 200,
+}) {
+  const expectedAddress = typeof address === 'string' ? address.toLowerCase() : '';
+  const embeddedWallet = isPrivyWalletClientType(walletClientType);
+  const deadline = Date.now() + timeoutMs;
+
+  if (!embeddedWallet && !expectedAddress && fallbackProvider && typeof fallbackProvider.request === 'function') {
+    return fallbackProvider;
+  }
+
+  while (Date.now() < deadline) {
+    if (isReady()) {
+      const currentWallets = getWallets();
+      const wallets = Array.isArray(currentWallets) ? currentWallets : [];
+      const wallet = wallets.find((item) => (
+        isEvmWallet(item) &&
+        (!expectedAddress || item.address.toLowerCase() === expectedAddress) &&
+        (!walletClientType || item.walletClientType === walletClientType) &&
+        typeof item.getEthereumProvider === 'function'
+      ));
+
+      if (wallet) {
+        try {
+          const provider = await wallet.getEthereumProvider();
+          if (provider && typeof provider.request === 'function') return provider;
+        } catch {
+          // Privy's secure wallet connection can still be initializing; retry until the deadline.
+        }
+      }
+
+      if (!embeddedWallet && fallbackProvider && typeof fallbackProvider.request === 'function') {
+        return fallbackProvider;
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, Math.min(retryIntervalMs, Math.max(0, deadline - Date.now()))));
+  }
+
+  if (!embeddedWallet && fallbackProvider && typeof fallbackProvider.request === 'function') {
+    return fallbackProvider;
+  }
+  return null;
 }
