@@ -167,15 +167,18 @@ const linkDom = new JSDOM(html, {
   runScripts: 'outside-only',
   pretendToBeVisual: true,
 });
+Object.defineProperty(linkDom.window, 'innerWidth', { value: 390, configurable: true });
 for (const script of linkDom.window.document.querySelectorAll('script:not([src])')) {
   if (script.textContent) linkDom.window.eval(script.textContent);
 }
 const linkedInvoice = { id: 'INV-CF1F8E1B', invoiceId, merchant, amount: 0.1, amountBase: '100000000000000000', status: 'open' };
 linkDom.window.arusPayApi.openInvoice(linkedInvoice);
 linkDom.window.arusPayAuthenticated({ id: 'did:privy:existing-session', linkedAccounts: [] }, []);
+await new Promise((resolve) => setTimeout(resolve, 25)); // Simulate a slow Privy/RPC callback after route hydration.
+linkDom.window.arusPayApi.replaceInvoices([]); // Delayed wallet sync may return no merchant invoices.
 assert.equal(linkDom.window.document.querySelector('#payment').classList.contains('hidden'), false, 'An existing Privy session must not redirect a payment link to the dashboard.');
 assert.equal(linkDom.window.document.querySelector('#workspace').classList.contains('hidden'), true, 'The merchant dashboard must stay hidden for a payer link.');
-assert.equal(linkDom.window.arusPayApi.getSelectedInvoice().invoiceId, invoiceId, 'The linked invoice selection must survive session restoration.');
+assert.equal(linkDom.window.arusPayApi.getSelectedInvoice()?.invoiceId, invoiceId, 'A delayed empty wallet sync must not clear the linked invoice selection.');
 linkDom.window.arusPayUnauthenticated();
 assert.equal(linkDom.window.document.querySelector('#payment').classList.contains('hidden'), false, 'Signing out must not hide a public invoice payment page.');
 assert.equal(linkDom.window.arusPayApi.getSelectedInvoice().invoiceId, invoiceId, 'The linked invoice selection must survive sign-out.');
