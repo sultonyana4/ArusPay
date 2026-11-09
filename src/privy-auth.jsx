@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { PrivyProvider, useExportWallet, useLinkAccount, useLogin, usePrivy, useWallets } from '@privy-io/react-auth';
 import { defineChain } from 'viem';
+import { selectWalletsForOnchainSync } from './privy-wallets.js';
 
 const ARC_RPC = import.meta.env.VITE_ARUSPAY_BROWSER_RPC_URL || 'https://rpc.blockdaemon.testnet.arc.io';
 const arcTestnet = defineChain({
@@ -127,7 +128,8 @@ function PrivyBridge() {
   useEffect(() => {
     if (!ready) return;
     if (authenticated && user) {
-      window.arusPayAuthenticated?.(user, wallets || []);
+      const onchainWallets = selectWalletsForOnchainSync(wallets || [], user);
+      window.arusPayAuthenticated?.(user, onchainWallets);
     } else {
       window.arusPayUnauthenticated?.();
     }
