@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
 const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+const arcSyncSource = await readFile(new URL('../src/arc-invoices.js', import.meta.url), 'utf8');
 const dom = new JSDOM(html, {
   url: 'https://aruspay.test/',
   runScripts: 'outside-only',
@@ -15,6 +16,10 @@ const inlineScripts = [...window.document.querySelectorAll('script:not([src])')]
   .map((script) => script.textContent)
   .filter(Boolean);
 for (const script of inlineScripts) window.eval(script);
+assert.equal(window.document.querySelector('#received-total').textContent, '—', 'Revenue must not default to zero before invoice sync.');
+assert.equal(window.document.querySelector('#outstanding-total').textContent, '—');
+assert.equal(window.document.querySelector('#paid-count').textContent, '—');
+assert.match(window.document.querySelector('#invoice-empty').textContent, /Connect a Privy wallet/);
 
 const exported = [];
 let linked = 0;
@@ -41,6 +46,13 @@ window.arusPayAuthenticated(user, wallets);
 await new Promise((resolve) => setTimeout(resolve, 0));
 assert.equal(window.document.querySelector('#wallet-balance').textContent, '—', 'A wallet balance is not fabricated before a chain read completes.');
 assert.match(window.document.querySelector('#wallet-balance-state').textContent, /Connect a Privy wallet/);
+window.arusPayApi.setInvoiceSyncState('loading');
+assert.equal(window.document.querySelector('#received-total').textContent, '—', 'A pending RPC read must not show zero revenue.');
+window.arusPayApi.setInvoiceSyncState('error');
+assert.equal(window.document.querySelector('#received-total').textContent, '—', 'An RPC error must not be masked by zero revenue.');
+assert.match(window.document.querySelector('#received-foot').textContent, /Unavailable/);
+window.arusPayApi.setInvoiceSyncState('success');
+assert.equal(window.document.querySelector('#received-total').textContent, '0.00', 'A zero is valid only after a successful empty on-chain read.');
 window.arusPayApi.replaceInvoices([{
   id: 'unverified', invoiceId: `0x${'1'.repeat(64)}`, name: 'Test invoice', initials: 'TI',
   amount: 99, status: 'paid', createdAt: new Date().toISOString(), onchainVerified: false,
@@ -58,6 +70,23 @@ assert.equal(window.document.querySelector('#paid-count').textContent, '1');
 window.arusPayApi.clearInvoices();
 window.navigate('profile');
 assert.equal(window.document.querySelector('#profile-view').classList.contains('hidden'), false);
+assert.equal(window.document.querySelector('#profile-wallet-balance').textContent, '—', 'Profile balance must stay empty until the chain read returns.');
+assert.match(window.document.querySelector('#profile-wallet-balance-state').textContent, /Connect a Privy wallet/);
+assert.equal(window.document.querySelector('#profile-wallet-address').textContent, 'Not connected');
+const balanceSetter = arcSyncSource.match(/function setWalletBalance\([\s\S]*?\n\}/)?.[0] || '';
+assert.match(balanceSetter, /#wallet-balance/);
+assert.match(balanceSetter, /#profile-wallet-balance/);
+assert.match(balanceSetter, /#profile-wallet-address/);
+assert.match(arcSyncSource, /publicClient\.getBalance\(\{\s*address:\s*safeAddress\s*\}\)/);
+assert.match(arcSyncSource, /setInvoiceSyncState\('loading'\)/);
+assert.match(arcSyncSource, /setInvoiceSyncState\('error'\)/);
+assert.match(arcSyncSource, /const ARC_TESTNET_ID = 5042002/);
+assert.match(arcSyncSource, /const CONTRACT_ADDRESS = getAddress\('0x0cc3b91Fc603Ef15d80B3C0e8DB222e5988b8926'\)/);
+assert.match(arcSyncSource, /functionName: 'createInvoice'/);
+assert.match(arcSyncSource, /functionName: 'payInvoice'/);
+assert.match(arcSyncSource, /if \(receipt\.status !== 'success'\)/);
+assert.match(arcSyncSource, /window\.arusPayApi\?\.addInvoice\(record\)/);
+assert.match(arcSyncSource, /const link = makeInvoiceLink\(invoice\.merchant, selected\.invoiceId\)/);
 assert.match(window.document.querySelector('#linked-account-list').textContent, /smoke@example\.test/);
 assert.match(window.document.querySelector('#x-link-status').textContent, /@smokeuser/);
 assert.match(window.document.querySelector('#wallet-address-list').textContent, new RegExp(address));

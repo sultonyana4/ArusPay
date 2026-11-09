@@ -11,10 +11,11 @@ import {
 } from 'viem';
 
 const ARC_TESTNET_ID = 5042002;
-const ARC_RPC = import.meta.env.VITE_ARUSPAY_BROWSER_RPC_URL || 'https://rpc.blockdaemon.testnet.arc.io';
+const ARC_ENV = import.meta.env || {};
+const ARC_RPC = ARC_ENV.VITE_ARUSPAY_BROWSER_RPC_URL || 'https://rpc.blockdaemon.testnet.arc.io';
 const CONTRACT_ADDRESS = getAddress('0x0cc3b91Fc603Ef15d80B3C0e8DB222e5988b8926');
 // The contract was deployed at block 71546111; Arc limits eth_getLogs ranges to 10,000 blocks.
-const CONTRACT_START_BLOCK = BigInt(import.meta.env.VITE_ARUSPAY_DEPLOYMENT_BLOCK || '71546111');
+const CONTRACT_START_BLOCK = BigInt(ARC_ENV.VITE_ARUSPAY_DEPLOYMENT_BLOCK || '71546111');
 const LOG_BLOCK_RANGE = 9999n;
 const EXPLORER = 'https://explorer.testnet.arc.io';
 const STATUS = { none: 0, open: 1, paid: 2, cancelled: 3 };
@@ -590,11 +591,20 @@ let dashboardSyncRequest = 0;
 function setWalletBalance(value, message, error = '') {
   const balance = $('#wallet-balance');
   const status = $('#wallet-balance-state');
+  const profileBalance = $('#profile-wallet-balance');
+  const profileStatus = $('#profile-wallet-balance-state');
+  const profileAddress = $('#profile-wallet-address');
   if (balance) balance.textContent = value;
   if (status) {
     status.textContent = message;
     status.title = error;
   }
+  if (profileBalance) profileBalance.textContent = value;
+  if (profileStatus) {
+    profileStatus.textContent = message;
+    profileStatus.title = error;
+  }
+  if (profileAddress) profileAddress.textContent = activeWalletAddress || 'Not connected';
 }
 
 function setInvoiceSyncStatus(message, error = '') {
@@ -609,10 +619,11 @@ async function refreshArcDashboard(address = activeWalletAddress) {
   const safeAddress = getAddress(address);
   activeWalletAddress = safeAddress;
   const request = ++dashboardSyncRequest;
-  const refreshButton = $('#refresh-chain-sync');
-  if (refreshButton) refreshButton.disabled = true;
+  const refreshButtons = [$('#refresh-chain-sync'), $('#profile-refresh-chain-sync')].filter(Boolean);
+  refreshButtons.forEach((button) => { button.disabled = true; });
   setWalletBalance('—', 'Reading Arc Testnet…');
   setInvoiceSyncStatus('Syncing invoice events from Arc Testnet…');
+  window.arusPayApi?.setInvoiceSyncState('loading');
 
   const verifiedChain = publicClient.getChainId().then((chainId) => {
     if (chainId !== ARC_TESTNET_ID) throw new Error('The RPC endpoint returned an unexpected chain ID.');
@@ -639,14 +650,17 @@ async function refreshArcDashboard(address = activeWalletAddress) {
   } else {
     const message = invoicesResult.reason?.shortMessage || invoicesResult.reason?.message || 'Arc Testnet invoices could not be read.';
     setInvoiceSyncStatus('Invoice sync unavailable · refresh to retry', message);
+    window.arusPayApi?.setInvoiceSyncState('error');
   }
 
-  if (refreshButton) refreshButton.disabled = false;
+  refreshButtons.forEach((button) => { button.disabled = false; });
 }
 
 window.arusPayRefreshSync = () => refreshArcDashboard();
-$('#refresh-chain-sync')?.addEventListener('click', () => {
-  if (activeWalletAddress) void refreshArcDashboard(activeWalletAddress);
+['#refresh-chain-sync', '#profile-refresh-chain-sync'].forEach((selector) => {
+  $(selector)?.addEventListener('click', () => {
+    if (activeWalletAddress) void refreshArcDashboard(activeWalletAddress);
+  });
 });
 
 window.arusPayWalletChanged = (wallets = []) => {
@@ -662,15 +676,24 @@ window.arusPayWalletChanged = (wallets = []) => {
       void refreshArcDashboard(activeWalletAddress);
     } catch {
       activeWalletAddress = null;
+      dashboardSyncRequest += 1;
       setWalletBalance('—', 'Privy returned an invalid wallet address.');
       setInvoiceSyncStatus('Invoice sync unavailable · check the connected wallet.');
+      window.arusPayApi?.setInvoiceSyncState('error');
+      ['#refresh-chain-sync', '#profile-refresh-chain-sync'].forEach((selector) => {
+        const button = $(selector);
+        if (button) button.disabled = false;
+      });
     }
     return;
   }
   activeWalletAddress = null;
   dashboardSyncRequest += 1;
-  const refreshButton = $('#refresh-chain-sync');
-  if (refreshButton) refreshButton.disabled = false;
+  window.arusPayApi?.setInvoiceSyncState('disconnected');
+  ['#refresh-chain-sync', '#profile-refresh-chain-sync'].forEach((selector) => {
+    const button = $(selector);
+    if (button) button.disabled = false;
+  });
   showWalletStatus('', window.arusPayAuthenticatedState ? 'Wallet not connected' : '');
   setWalletBalance('—', 'Connect a Privy wallet to read its balance.');
   setInvoiceSyncStatus('Connect a Privy wallet to sync Arc invoices.');

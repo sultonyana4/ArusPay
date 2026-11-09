@@ -8,16 +8,18 @@ import { decodeEventLog, decodeFunctionData, decodeFunctionResult, encodeFunctio
 
 const exec = promisify(execFile);
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
-const RPC = 'https://rpc.testnet.arc.io';
+const RPC = process.env.ARUSPAY_TESTNET_RPC_URL || 'https://rpc.blockdaemon.testnet.arc.io';
 const CHAIN_ID = 5042002;
 const CONTRACT = getAddress('0x0cc3b91Fc603Ef15d80B3C0e8DB222e5988b8926');
 const AMOUNT = parseUnits('0.10', 18);
 const EXPLORER = 'https://explorer.testnet.arc.io';
-const PREVIEW = process.env.ARUSPAY_PREVIEW_URL || 'http://localhost:4173/';
+const APP_URL = 'https://aruspay-pi.vercel.app/';
 const KEYSTORE = process.env.ARUSPAY_TEST_KEYSTORE;
 const PASSWORD_FILE = process.env.ARUSPAY_TEST_PASSWORD_FILE;
 const CAST = process.env.ARC_CAST_BIN || '/home/ubuntu/.local/bin/arc-cast';
 const RESULT_PATH = process.env.ARUSPAY_E2E_RESULT || '/tmp/aruspay-testnet-e2e-result.json';
+const TRACE = process.env.ARUSPAY_E2E_TRACE === '1';
+const DRY_RUN = process.env.ARUSPAY_E2E_DRY_RUN === '1';
 const submissions = [];
 let merchant;
 let createdInvoiceId;
@@ -38,7 +40,7 @@ try {
 async function rpc(method, params) {
   const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
   const { stdout } = await exec('curl', [
-    '--fail', '--silent', '--show-error', '--max-time', '30',
+    '--fail', '--silent', '--show-error', '--compressed', '--max-time', '30',
     '-H', 'Content-Type: application/json', '--data-binary', body, RPC,
   ], { maxBuffer: 4 * 1024 * 1024, timeout: 35000 });
   const response = JSON.parse(stdout);
@@ -79,6 +81,7 @@ const allowedReadMethods = new Set([
 
 const provider = {
   async request({ method, params = [] }) {
+    if (TRACE) console.log(`E2E provider request: ${method}`);
     if (method === 'eth_accounts' || method === 'eth_requestAccounts') return [merchant];
     if (method === 'wallet_switchEthereumChain') {
       if (Number(BigInt(params[0]?.chainId || '0x0')) !== CHAIN_ID) throw new Error('Only Arc Testnet is permitted.');
@@ -87,6 +90,11 @@ const provider = {
     if (method === 'eth_sendTransaction') {
       if (submissions.length >= 2) throw new Error('The E2E signer permits only one create and one pay transaction.');
       const tx = params[0];
+      if (TRACE) console.log('E2E transaction request summary:', JSON.stringify({
+        keys: Object.keys(tx || {}), from: tx?.from, to: tx?.to, chainId: tx?.chainId,
+        dataPrefix: typeof tx?.data === 'string' ? tx.data.slice(0, 10) : null,
+        dataLength: typeof tx?.data === 'string' ? tx.data.length : null, value: tx?.value,
+      }));
       if (getAddress(tx.to) !== CONTRACT || getAddress(tx.from) !== merchant) throw new Error('Unexpected test transaction sender or target.');
       if (tx.chainId && Number(BigInt(tx.chainId)) !== CHAIN_ID) throw new Error('Unexpected transaction chain.');
       const decoded = decodeFunctionData({ abi, data: tx.data });
@@ -101,6 +109,8 @@ const provider = {
         throw new Error('Unexpected invoice payment payload.');
       }
       if (Number(BigInt(await rpc('eth_chainId', []))) !== CHAIN_ID) throw new Error('RPC chain changed; signing stopped.');
+      if (TRACE) console.log('E2E decoded transaction:', JSON.stringify({ functionName: decoded.functionName, amountBase: (decoded.functionName === 'createInvoice' ? decoded.args[1] : decoded.args[1])?.toString(), valueBase: value.toString() }));
+      if (DRY_RUN) throw new Error('Dry run blocked before signing or transaction submission.');
       const args = [
         'send', CONTRACT, '--data', tx.data, '--value', value.toString(),
         '--rpc-url', RPC, '--keystore', KEYSTORE, '--password-file', PASSWORD_FILE,
@@ -111,6 +121,7 @@ const provider = {
         ({ stdout } = await exec(CAST, args, { timeout: 90000, maxBuffer: 1024 * 1024 }));
       } catch (error) {
         const uncertainHash = String(error.stdout || '').match(/0x[0-9a-fA-F]{64}/)?.[0];
+        if (TRACE) console.error('arc-cast send stderr:', String(error.stderr || '').replace(/0x[0-9a-fA-F]{64,}/g, '[hex omitted]').slice(-1500));
         if (uncertainHash) submissions.push({ functionName: decoded.functionName, hash: uncertainHash, uncertain: true });
         await saveRecovery({ error: 'Transaction submission did not return cleanly. Inspect existing transactions before retrying.' });
         throw new Error('Transaction submission did not return cleanly; no automatic retry will be attempted.');
@@ -137,7 +148,7 @@ globalThis.fetch = async (input, init = {}) => {
   const requests = Array.isArray(request) ? request : [request];
   if (requests.some((item) => !allowedReadMethods.has(item.method))) throw new Error('Unexpected public RPC write request.');
   const { stdout } = await exec('curl', [
-    '--fail', '--silent', '--show-error', '--max-time', '30',
+    '--fail', '--silent', '--show-error', '--compressed', '--max-time', '30',
     '-H', 'Content-Type: application/json', '--data-binary', body, RPC,
   ], { maxBuffer: 4 * 1024 * 1024, timeout: 35000 });
   return new Response(stdout, { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -146,7 +157,7 @@ globalThis.fetch = async (input, init = {}) => {
 const html = await readFile(`${ROOT}index.html`, 'utf8');
 const virtualConsole = new VirtualConsole();
 virtualConsole.on('jsdomError', (error) => console.error(`DOM test error: ${error.message}`));
-const dom = new JSDOM(html, { url: PREVIEW, runScripts: 'dangerously', pretendToBeVisual: true, virtualConsole });
+const dom = new JSDOM(html, { url: APP_URL, runScripts: 'dangerously', pretendToBeVisual: true, virtualConsole });
 globalThis.window = dom.window;
 globalThis.document = dom.window.document;
 window.arusPayPrivy = { getEthereumProvider: async () => provider };
@@ -196,7 +207,7 @@ try {
   const contractBalance = BigInt(await rpc('eth_getBalance', [CONTRACT, 'latest']));
   const gasFees = BigInt(createReceipt.gasUsed) * BigInt(createReceipt.effectiveGasPrice)
     + BigInt(paymentReceipt.gasUsed) * BigInt(paymentReceipt.effectiveGasPrice);
-  const paymentLink = new URL(PREVIEW);
+  const paymentLink = new URL(APP_URL);
   paymentLink.searchParams.set('merchant', merchant);
   paymentLink.searchParams.set('invoiceId', invoice.invoiceId);
   const result = {
