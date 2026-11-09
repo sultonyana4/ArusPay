@@ -3,8 +3,12 @@ import { createRoot } from 'react-dom/client';
 import { PrivyProvider, useExportWallet, useLinkAccount, useLogin, usePrivy, useWallets } from '@privy-io/react-auth';
 import { defineChain } from 'viem';
 
+const ARC_TESTNET_ID = 5042002;
+const configuredChainId = Number(import.meta.env.VITE_ARUSPAY_CHAIN_ID || ARC_TESTNET_ID);
+if (configuredChainId !== ARC_TESTNET_ID) throw new Error('This preview is locked to Arc Testnet (chain ID 5042002).');
+
 const arcTestnet = defineChain({
-  id: 5042002,
+  id: ARC_TESTNET_ID,
   name: 'Arc Testnet',
   nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
   rpcUrls: { default: { http: ['https://rpc.testnet.arc.io'] } },
@@ -16,7 +20,7 @@ const appId = import.meta.env.VITE_PRIVY_APP_ID || 'cmw96cg3m00c30hl5gg2jvnxa';
 
 function PrivyBridge() {
   const { login } = useLogin();
-  const { authenticated, ready, user, logout } = usePrivy();
+  const { authenticated, ready, user, logout, getAccessToken } = usePrivy();
   const { wallets } = useWallets();
   const { exportWallet } = useExportWallet();
   const { linkTwitter } = useLinkAccount({
@@ -78,7 +82,25 @@ function PrivyBridge() {
   }, []);
 
   useEffect(() => {
+    const profileApiUrl = import.meta.env.VITE_ARUSPAY_API_URL;
+    const requestProfile = async (action, displayName) => {
+      if (!profileApiUrl) throw new Error('Profile sync is not configured.');
+      const accessToken = await getAccessToken();
+      if (!accessToken) throw new Error('Sign in with Privy to sync your profile.');
+      const response = await fetch(profileApiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ action, ...(displayName === undefined ? {} : { displayName }) }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload) {
+        throw new Error(response.status === 401 ? 'Your Privy session is no longer valid.' : 'Profile sync failed. No change was saved.');
+      }
+      return payload.profile ?? null;
+    };
     window.arusPayPrivy = {
+      getProfile: () => requestProfile('get_profile'),
+      saveProfile: (displayName) => requestProfile('save_profile', displayName),
       login: async (method) => {
         const loginMethod = method === 'x' ? 'twitter' : method;
         try {
@@ -121,7 +143,7 @@ function PrivyBridge() {
     return () => {
       delete window.arusPayPrivy;
     };
-  }, [authenticated, exportWallet, linkTwitter, login, logout, wallets]);
+  }, [authenticated, exportWallet, getAccessToken, linkTwitter, login, logout, wallets]);
 
   useEffect(() => {
     if (!ready) return;

@@ -30,7 +30,7 @@ npm run build
 npm run preview
 ```
 
-Set `VITE_PRIVY_APP_ID` in a local `.env` file to override the public Privy app ID used by the prototype.
+Copy `.env.example` to `.env` for local setup. Vite variables are public client configuration only; never put a Supabase service-role key, wallet private key, or other secret in a `VITE_` variable.
 
 ## Invoice and payment flow
 
@@ -45,11 +45,12 @@ Set `VITE_PRIVY_APP_ID` in a local `.env` file to override the public Privy app 
 
 - The Profile page uses the authenticated Privy user and linked accounts returned by Privy. It shows a wallet address only when Privy returns an embedded EVM wallet; the address can be copied from the page.
 - X/Twitter linking uses Privy's authenticated-user account-link flow. It links X to the current Privy user rather than starting a new sign-in flow.
-- Display names are stored in this browser's local storage, scoped to the Privy user ID. There is no backend profile service, so names are not synced to other browsers or devices.
+- Display names are synced through the `aruspay-api` Supabase Edge Function. The function verifies the Privy access-token signature and claims, then reads or updates only the profile row whose ID matches the verified Privy subject. Legacy browser-only names are migrated only after the server confirms the save.
+- Supabase tables keep row-level security enabled without browser-access policies. The service-role key is used only by the Edge Function at runtime and must never be added to Vercel client variables, browser code, or source control.
 - Private-key export is started only after the user confirms an on-screen safety warning, then handled by Privy's own export modal. ArusPay does not retrieve, receive, log, or store the private key. Anyone who obtains the key can control the wallet.
 - The profile flow performs no on-chain transactions.
 
-Run the safe profile smoke test with `npm run test:profile`. It exercises the UI in isolated JSDOM fixtures with mocked Privy methods, including account rendering, copy actions, local-only name storage, X-link gating, key-export confirmation/cancel, and empty states. It does not authenticate a real user, reveal a private key, or send transactions. Live X authorization and the Privy export modal should be verified from the account owner's own signed-in session.
+Run the safe profile smoke test with `npm run test:profile`. It exercises the UI in isolated JSDOM fixtures with mocked API responses, including cloud profile read/write, account isolation, legacy-name migration, failed-save handling, copy actions, X-link gating, key-export confirmation/cancel, and empty states. It does not authenticate a real user, reveal a private key, or send transactions. Live X authorization, profile sync, and the Privy export modal should be verified from the account owner's own signed-in session.
 
 The preview should remain testnet-only until a separate, explicit mainnet launch decision and production review.
 

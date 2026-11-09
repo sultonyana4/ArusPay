@@ -18,7 +18,19 @@ for (const script of inlineScripts) window.eval(script);
 
 const exported = [];
 let linked = 0;
+let activeTestUserId = '';
+let failProfileSave = false;
+const serverProfiles = new Map();
+const savedProfiles = [];
 window.arusPayPrivy = {
+  getProfile: async () => serverProfiles.get(activeTestUserId) ?? null,
+  saveProfile: async (displayName) => {
+    if (failProfileSave) throw new Error('Simulated API failure.');
+    const profile = { display_name: displayName };
+    savedProfiles.push({ userId: activeTestUserId, profile });
+    serverProfiles.set(activeTestUserId, profile);
+    return profile;
+  },
   exportWallet: async (address) => { exported.push(address); },
   linkTwitter: () => { linked += 1; },
 };
@@ -37,7 +49,9 @@ const user = {
 };
 const address = user.linkedAccounts[2].address;
 const wallets = [{ address, walletClientType: 'privy', chainType: 'ethereum' }];
+activeTestUserId = user.id;
 window.arusPayAuthenticated(user, wallets);
+await new Promise((resolve) => setTimeout(resolve, 0));
 window.navigate('profile');
 assert.equal(window.document.querySelector('#profile-view').classList.contains('hidden'), false);
 assert.match(window.document.querySelector('#linked-account-list').textContent, /smoke@example\.test/);
@@ -49,14 +63,27 @@ await new Promise((resolve) => setTimeout(resolve, 0));
 assert.deepEqual(copied, [address]);
 
 const name = window.document.querySelector('#display-name-input');
-name.value = 'Local Profile';
+name.value = 'Cloud Profile';
 window.document.querySelector('#display-name-form').dispatchEvent(new window.Event('submit', {
   bubbles: true,
   cancelable: true,
 }));
-assert.equal(window.localStorage.getItem('aruspay:profile-display-name:did:privy:smoke-test'), 'Local Profile');
-assert.equal(window.localStorage.length, 1, 'Only the local display name is stored in this test.');
-assert.match(window.document.querySelector('#display-name-status').textContent, /not synced to a cloud profile/);
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(serverProfiles.get(user.id)?.display_name, 'Cloud Profile');
+assert.deepEqual(savedProfiles.at(-1), { userId: user.id, profile: { display_name: 'Cloud Profile' } });
+assert.equal(window.localStorage.length, 0, 'A synced profile name is not stored in localStorage.');
+assert.match(window.document.querySelector('#display-name-status').textContent, /synced to your Privy profile/);
+failProfileSave = true;
+name.value = 'Unsaved Profile';
+window.document.querySelector('#display-name-form').dispatchEvent(new window.Event('submit', {
+  bubbles: true,
+  cancelable: true,
+}));
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(serverProfiles.get(user.id)?.display_name, 'Cloud Profile', 'A failed request must not update the saved profile.');
+assert.match(window.document.querySelector('#display-name-status').textContent, /No change was saved/);
+assert.equal(window.localStorage.length, 0, 'A failed cloud save must not fall back to local-only storage.');
+failProfileSave = false;
 window.document.querySelector('#link-x-button').click();
 assert.equal(linked, 0, 'An already-linked X account must not start a new link flow.');
 
@@ -76,14 +103,26 @@ const noXUser = {
   id: 'did:privy:no-x',
   linkedAccounts: [{ type: 'email', address: 'no-x@example.test' }],
 };
+activeTestUserId = noXUser.id;
+serverProfiles.set(noXUser.id, { display_name: 'No X Cloud Name' });
 window.arusPayAuthenticated(noXUser, []);
+await new Promise((resolve) => setTimeout(resolve, 0));
 window.navigate('profile');
-assert.notEqual(window.document.querySelector('#display-name-input').value, 'Local Profile', 'Names must be scoped to each Privy user.');
+assert.equal(window.document.querySelector('#display-name-input').value, 'No X Cloud Name', 'The current Privy account loads only its own server profile.');
 window.document.querySelector('#link-x-button').click();
 assert.equal(linked, 1, 'An unlinked X account must call the Privy link method.');
 assert.match(window.document.querySelector('#wallet-address-list').textContent, /No Privy embedded EVM wallet found/);
 assert.match(window.document.querySelector('#export-wallet-actions').textContent, /No Privy embedded wallet available/);
 
+const legacyUser = { id: 'did:privy:legacy', linkedAccounts: [] };
+activeTestUserId = legacyUser.id;
+window.localStorage.setItem(`aruspay:profile-display-name:${legacyUser.id}`, 'Legacy Name');
+window.arusPayAuthenticated(legacyUser, []);
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(serverProfiles.get(legacyUser.id)?.display_name, 'Legacy Name', 'An existing browser-only name should migrate to the verified profile API.');
+assert.equal(window.localStorage.getItem(`aruspay:profile-display-name:${legacyUser.id}`), null, 'Remove the legacy value only after the server confirms the migration.');
+
+activeTestUserId = 'did:privy:external';
 window.arusPayAuthenticated({ id: 'did:privy:external', linkedAccounts: [] }, [{
   address,
   walletClientType: 'metamask',
@@ -94,5 +133,5 @@ assert.equal(window.document.querySelector('[data-export-wallet]'), null, 'Exter
 window.arusPayUnauthenticated();
 assert.equal(window.document.querySelector('#signin').classList.contains('hidden'), false);
 
-console.log('PASS: profile route, linked identities, copy address, local-only name, user isolation, X-link gating, export confirmation/cancel, and embedded-wallet-only empty states.');
+console.log('PASS: profile route, linked identities, copy address, cloud profile read/write and isolation, safe legacy migration, failed-save handling, X-link gating, export confirmation/cancel, and embedded-wallet-only empty states.');
 dom.window.close();

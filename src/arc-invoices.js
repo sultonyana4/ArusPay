@@ -12,7 +12,9 @@ import {
 
 const ARC_TESTNET_ID = 5042002;
 const ARC_RPC = 'https://rpc.testnet.arc.io';
-const CONTRACT_ADDRESS = getAddress('0x0cc3b91Fc603Ef15d80B3C0e8DB222e5988b8926');
+const CONTRACT_ADDRESS = getAddress(import.meta.env.VITE_ARUSPAY_CONTRACT_ADDRESS || '0x0cc3b91Fc603Ef15d80B3C0e8DB222e5988b8926');
+const configuredChainId = Number(import.meta.env.VITE_ARUSPAY_CHAIN_ID || ARC_TESTNET_ID);
+if (configuredChainId !== ARC_TESTNET_ID) throw new Error('This preview is locked to Arc Testnet (chain ID 5042002).');
 const EXPLORER = 'https://explorer.testnet.arc.io';
 const STATUS = { none: 0, open: 1, paid: 2, cancelled: 3 };
 
