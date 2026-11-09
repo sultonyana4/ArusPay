@@ -1,0 +1,19 @@
+node_modules/
+dist/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.keystore
+*.key
+keystore/
+wallets/
+
+# Foundry generated artifacts
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+
+# Test output
+coverage/
