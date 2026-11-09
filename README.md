@@ -36,6 +36,8 @@ Copy `.env.example` to `.env` for local setup. Vite variables are public client 
 
 - `createInvoice(bytes32,uint256,uint64)` records the merchant, exact native-USDC amount, and expiry on Arc Testnet. Invoice IDs are random opaque values and do not contain client information.
 - The app validates a confirmed `InvoiceCreated` receipt/event before showing an invoice as created.
+- The dashboard reads the connected Privy wallet's native USDC balance with `eth_getBalance` (18 decimals), and syncs the wallet's invoice events from the contract deployment block in ranges below Arc's 10,000-block `eth_getLogs` limit. It then reads each invoice's current contract state. Refreshing is read-only and submits no transaction.
+- `Total received` and `Confirmed payments` include only invoices whose current contract state is `Paid` and whose matching `InvoicePaid` event has the exact amount and merchant. A faucet balance appears only under `Wallet balance`; it is not revenue.
 - A payment link contains only the merchant address and invoice ID. Client name, email, description, and note remain off-chain in the current browser session; no email or backend delivery is configured.
 - `payInvoice(address,bytes32)` submits the exact invoice value as native USDC. The app validates the successful receipt and matching `InvoicePaid` event, then checks the contract state before showing the invoice as paid.
 - The connected wallet pays its own Arc Testnet USDC gas fees. No gas sponsorship, relayer, or token approval is used.
