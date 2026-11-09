@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { PrivyProvider, useExportWallet, useLinkAccount, useLogin, usePrivy, useWallets } from '@privy-io/react-auth';
 import { defineChain } from 'viem';
@@ -20,6 +20,8 @@ function PrivyBridge() {
   const { login } = useLogin();
   const { authenticated, ready, user, logout } = usePrivy();
   const { wallets } = useWallets();
+  const walletsRef = useRef(wallets || []);
+  walletsRef.current = wallets || [];
   const { exportWallet } = useExportWallet();
   const { linkTwitter } = useLinkAccount({
     onSuccess: ({ user: linkedUser }) => {
@@ -114,8 +116,12 @@ function PrivyBridge() {
         }
       },
       getEthereumProvider: async () => {
-        const wallet = wallets.find((item) => item.chainType === 'ethereum' || item.chainType === 'evm');
-        if (wallet?.getEthereumProvider) return wallet.getEthereumProvider();
+        const deadline = Date.now() + 2000;
+        while (Date.now() < deadline) {
+          const wallet = walletsRef.current.find((item) => item.chainType === 'ethereum' || item.chainType === 'evm');
+          if (wallet?.getEthereumProvider) return wallet.getEthereumProvider();
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
         return window.ethereum || null;
       },
     };

@@ -167,7 +167,12 @@ function showWalletStatus(address, message = '') {
 async function getProvider() {
   const fromPrivy = await window.arusPayPrivy?.getEthereumProvider?.();
   const provider = fromPrivy || window.ethereum;
-  if (!provider?.request) throw new Error('Connect an Ethereum wallet through Privy to continue.');
+  if (!provider?.request) {
+    if (activeWalletAddress) {
+      throw new Error('Privy found your embedded wallet, but its secure signing connection is still loading. Try again shortly; no transaction was sent.');
+    }
+    throw new Error('Connect an Ethereum wallet through Privy to continue.');
+  }
   return provider;
 }
 
@@ -479,6 +484,7 @@ function renderPaymentUnavailable(message, merchant = '', invoiceId = '') {
 }
 
 async function renderPayment() {
+  const requestId = ++paymentRenderRequest;
   const view = $('#payment-view');
   const selected = window.arusPayApi?.getSelectedInvoice();
   if (!selected?.merchant || !selected?.invoiceId) {
@@ -488,6 +494,7 @@ async function renderPayment() {
   view.innerHTML = '<div class="panel payment-empty"><div class="empty-state"><strong>Reading Arc Testnet</strong><span>Checking invoice state directly from the contract…</span></div></div>';
   try {
     const invoice = await getOnchainInvoice(selected.merchant, selected.invoiceId);
+    if (requestId !== paymentRenderRequest) return;
     const status = statusText(invoice.status, invoice.expiresAt);
     if (invoice.status === STATUS.none) throw new Error('This invoice ID does not exist for the specified merchant.');
     const amount = formatUsdc(invoice.amount);
@@ -497,6 +504,23 @@ async function renderPayment() {
     const canPay = invoice.status === STATUS.open && status === 'Open';
     const stateClass = invoice.status === STATUS.paid ? 'paid' : invoice.status === STATUS.cancelled || status === 'Expired' ? 'overdue' : 'pending';
     view.innerHTML = `<div class="pay-crumb"><button class="table-link" id="payment-invoices">Invoices</button> <span style="color:#596578">/</span> <span class="mono">${escapeHtml(shortId(selected.invoiceId))}</span></div><div class="pay-layout"><section class="pay-main-card"><div class="pay-business"><div class="business-logo">AP</div><div><strong>ArusPay invoice</strong><span class="mono">${escapeHtml(shortId(selected.invoiceId))}</span></div></div><div class="pay-content"><span class="eyebrow">Arc Testnet · On-chain status</span><h1>${escapeHtml(status)}</h1><p>${known ? `Invoice for ${escapeHtml(known.name)}` : 'Invoice details read from Arc Testnet.'}</p><div class="pay-due"><div class="pay-due-label">${invoice.status === STATUS.paid ? 'Amount paid' : 'Amount due'}</div><div class="pay-due-amount">${escapeHtml(amount)} <span>USDC</span></div></div><div class="pay-network"><span class="chain-name"><i class="chain-icon">A</i> Arc Testnet</span><span class="status ${stateClass}">${escapeHtml(status)}</span></div><div class="availability-details"><span><b>Merchant</b> <span class="mono">${escapeHtml(invoice.merchant)}</span></span><span><b>Due / expiry</b> ${escapeHtml(due)}</span><span><b>Invoice ID</b> <span class="mono">${escapeHtml(selected.invoiceId)}</span></span></div><div class="fee-note"><span>ⓘ</span><span>Estimated fees are paid by your wallet in USDC. No gas sponsorship is used.</span></div>${canPay ? '<button class="btn btn-primary btn-full" id="pay-onchain" type="button">Pay invoice on Arc Testnet</button>' : ''}<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn btn-quiet btn-sm" id="copy-invoice-link" type="button">Copy payment link</button><a class="btn btn-quiet btn-sm" href="${EXPLORER}/address/${CONTRACT_ADDRESS}" target="_blank" rel="noreferrer">View contract</a></div>${known?.createTxHash ? `<p class="hint">Creation receipt: <a class="table-link" href="${EXPLORER}/tx/${known.createTxHash}" target="_blank" rel="noreferrer">${escapeHtml(shortAddress(known.createTxHash))}</a></p>` : ''}${known?.paymentTxHash ? `<p class="hint">Payment receipt: <a class="table-link" href="${EXPLORER}/tx/${known.paymentTxHash}" target="_blank" rel="noreferrer">${escapeHtml(shortAddress(known.paymentTxHash))}</a></p>` : ''}<p class="hint">Client name, email, descriptions, and notes are not written to the contract.</p></div></section><aside class="pay-summary"><h2>Invoice summary</h2><div class="summary-row"><span>Invoice number</span><strong>${escapeHtml(known?.id || shortId(selected.invoiceId))}</strong></div><div class="summary-row"><span>Client</span><strong>${escapeHtml(known?.name || 'Invoice recipient')}</strong></div><div class="summary-row"><span>Description</span><strong>${escapeHtml(known?.description || 'On-chain invoice')}</strong></div><div class="summary-row"><span>Due date</span><strong>${escapeHtml(due)}</strong></div><div class="summary-row summary-total"><span>Total</span><strong>${escapeHtml(amount)} USDC</strong></div><div class="payment-foot">State is read from the Arc Testnet contract.</div></aside></div>`;
+    const paymentButton = $('#pay-onchain');
+    if (paymentButton) {
+      if (!activeWalletAddress) {
+        paymentButton.textContent = 'Connect wallet to pay';
+      } else if (['privy', 'privy-v2'].includes(activeWalletType) && !activeWalletProviderReady) {
+        paymentButton.textContent = 'Continue with Privy wallet';
+      }
+      const walletHint = document.createElement('p');
+      walletHint.className = 'hint';
+      walletHint.setAttribute('role', 'status');
+      walletHint.textContent = !activeWalletAddress
+        ? 'Invoice status is read from the ArusPay contract. Connect an Ethereum wallet to pay.'
+        : ['privy', 'privy-v2'].includes(activeWalletType) && !activeWalletProviderReady
+          ? `Privy found embedded wallet ${shortAddress(activeWalletAddress)}. Its signing connection is still loading; no transaction has been sent.`
+          : `Payment will be sent from wallet ${shortAddress(activeWalletAddress)}.`;
+      paymentButton.before(walletHint);
+    }
     $('#payment-invoices')?.addEventListener('click', () => window.arusPayApi?.navigate('dashboard'));
     $('#copy-invoice-link')?.addEventListener('click', async () => {
       try {
@@ -506,8 +530,19 @@ async function renderPayment() {
         showToast(`Copy this link: ${link}`);
       }
     });
-    $('#pay-onchain')?.addEventListener('click', () => payInvoice(invoice.merchant, selected.invoiceId, invoice.amount));
+    paymentButton?.addEventListener('click', () => {
+      if (!activeWalletAddress && !window.ethereum?.request) {
+        if (window.arusPayPrivy?.login) {
+          void window.arusPayPrivy.login('wallet');
+        } else {
+          showToast('Wallet connection is still loading. Try again shortly; no transaction was sent.');
+        }
+        return;
+      }
+      void payInvoice(invoice.merchant, selected.invoiceId, invoice.amount);
+    });
   } catch (error) {
+    if (requestId !== paymentRenderRequest) return;
     renderPaymentUnavailable(error?.shortMessage || error?.message || 'The invoice could not be read from Arc Testnet.', selected.merchant, selected.invoiceId);
   }
 }
@@ -560,20 +595,15 @@ async function payInvoice(merchant, invoiceId, amount) {
   }
 }
 
-async function openSharedInvoice(merchant, invoiceId) {
+function openSharedInvoice(merchant, invoiceId) {
   try {
     const safeMerchant = getAddress(merchant);
     if (!/^0x[0-9a-fA-F]{64}$/.test(invoiceId)) throw new Error('The payment link has an invalid invoice ID.');
-    const invoice = await getOnchainInvoice(safeMerchant, invoiceId);
-    if (invoice.status === STATUS.none) throw new Error('No invoice was found for this merchant and invoice ID.');
     const id = `INV-${invoiceId.slice(2, 10).toUpperCase()}`;
     window.arusPayApi?.openInvoice({
       id,
       invoiceId,
       merchant: safeMerchant,
-      amount: Number(formatUnits(invoice.amount, 18)),
-      amountBase: invoice.amount.toString(),
-      status: invoice.status === STATUS.paid ? 'paid' : invoice.status === STATUS.cancelled ? 'cancelled' : 'open',
     });
   } catch (error) {
     $('#signin').classList.add('hidden');
@@ -586,6 +616,9 @@ async function openSharedInvoice(merchant, invoiceId) {
 window.arusPayUpdatePayment = renderPayment;
 window.arusPayCreateInvoice = createOnchainInvoice;
 let activeWalletAddress = null;
+let activeWalletType = '';
+let activeWalletProviderReady = false;
+let paymentRenderRequest = 0;
 let dashboardSyncRequest = 0;
 
 function setWalletBalance(value, message, error = '') {
@@ -672,10 +705,15 @@ window.arusPayWalletChanged = (wallets = []) => {
         window.arusPayApi?.clearInvoices(new URL(window.location.href).searchParams.has('invoiceId'));
       }
       activeWalletAddress = nextAddress;
+      activeWalletType = wallet.walletClientType || '';
+      activeWalletProviderReady = typeof wallet.getEthereumProvider === 'function'
+        || (activeWalletType !== 'privy' && activeWalletType !== 'privy-v2' && Boolean(window.ethereum?.request));
       showWalletStatus(activeWalletAddress);
       void refreshArcDashboard(activeWalletAddress);
     } catch {
       activeWalletAddress = null;
+      activeWalletType = '';
+      activeWalletProviderReady = false;
       dashboardSyncRequest += 1;
       setWalletBalance('—', 'Privy returned an invalid wallet address.');
       setInvoiceSyncStatus('Invoice sync unavailable · check the connected wallet.');
@@ -685,9 +723,14 @@ window.arusPayWalletChanged = (wallets = []) => {
         if (button) button.disabled = false;
       });
     }
+    if (!$('#payment').classList.contains('hidden') && window.arusPayApi?.getSelectedInvoice()) {
+      void renderPayment();
+    }
     return;
   }
   activeWalletAddress = null;
+  activeWalletType = '';
+  activeWalletProviderReady = Boolean(window.ethereum?.request);
   dashboardSyncRequest += 1;
   window.arusPayApi?.setInvoiceSyncState('disconnected');
   ['#refresh-chain-sync', '#profile-refresh-chain-sync'].forEach((selector) => {
@@ -697,6 +740,9 @@ window.arusPayWalletChanged = (wallets = []) => {
   showWalletStatus('', window.arusPayAuthenticatedState ? 'Wallet not connected' : '');
   setWalletBalance('—', 'Connect a Privy wallet to read its balance.');
   setInvoiceSyncStatus('Connect a Privy wallet to sync Arc invoices.');
+  if (!$('#payment').classList.contains('hidden') && window.arusPayApi?.getSelectedInvoice()) {
+    void renderPayment();
+  }
 };
 
 const url = new URL(window.location.href);

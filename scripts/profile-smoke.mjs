@@ -5,6 +5,16 @@ import { selectWalletsForOnchainSync } from '../src/privy-wallets.js';
 
 const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
 const arcSyncSource = await readFile(new URL('../src/arc-invoices.js', import.meta.url), 'utf8');
+const privyAuthSource = await readFile(new URL('../src/privy-auth.jsx', import.meta.url), 'utf8');
+const sharedInvoiceSource = arcSyncSource.match(/function openSharedInvoice\([\s\S]*?\n\}/)?.[0] || '';
+assert.ok(sharedInvoiceSource, 'A direct payment-link hydration function must exist.');
+assert.match(sharedInvoiceSource, /window\.arusPayApi\?\.openInvoice/, 'A valid payment link must select the invoice before asynchronous contract reads.');
+assert.doesNotMatch(sharedInvoiceSource, /await\s+getOnchainInvoice/, 'Payment-link selection must not wait for the chain before rendering the loading state.');
+assert.match(arcSyncSource, /requestId !== paymentRenderRequest/, 'Late RPC results must not overwrite a newer payment view.');
+assert.match(arcSyncSource, /Connect wallet to pay/, 'An invoice must show a wallet connection action without hiding its on-chain details.');
+assert.match(arcSyncSource, /Privy found your embedded wallet, but its secure signing connection is still loading/, 'A known Privy wallet without a ready provider must not be called disconnected.');
+assert.match(privyAuthSource, /walletsRef\.current\.find/, 'Provider lookup must use the latest Privy wallet list.');
+assert.match(privyAuthSource, /const deadline = Date\.now\(\) \+ 2000/, 'Provider lookup must briefly wait for Privy wallet restoration.');
 const dom = new JSDOM(html, {
   url: 'https://aruspay.test/',
   runScripts: 'outside-only',
