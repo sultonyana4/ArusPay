@@ -38,6 +38,24 @@ const user = {
 const address = user.linkedAccounts[2].address;
 const wallets = [{ address, walletClientType: 'privy', chainType: 'ethereum' }];
 window.arusPayAuthenticated(user, wallets);
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(window.document.querySelector('#wallet-balance').textContent, '—', 'A wallet balance is not fabricated before a chain read completes.');
+assert.match(window.document.querySelector('#wallet-balance-state').textContent, /Connect a Privy wallet/);
+window.arusPayApi.replaceInvoices([{
+  id: 'unverified', invoiceId: `0x${'1'.repeat(64)}`, name: 'Test invoice', initials: 'TI',
+  amount: 99, status: 'paid', createdAt: new Date().toISOString(), onchainVerified: false,
+}]);
+assert.equal(window.document.querySelector('#received-total').textContent, '0.00', 'An unverified payment is not counted as revenue.');
+assert.equal(window.document.querySelector('#paid-count').textContent, '0');
+assert.match(window.document.querySelector('#payment-activity-empty').textContent, /No confirmed payment activity/);
+window.arusPayApi.replaceInvoices([{
+  id: 'verified', invoiceId: `0x${'2'.repeat(64)}`, name: 'On-chain invoice', initials: 'AP',
+  amount: 4.25, amountBase: '4250000000000000000', status: 'paid', createdAt: new Date().toISOString(), paymentExplorerUrl: 'https://explorer.testnet.arc.io/tx/0xabc',
+  createTxHash: `0x${'3'.repeat(64)}`, onchainVerified: true,
+}]);
+assert.equal(window.document.querySelector('#received-total').textContent, '4.25', 'Only verified on-chain payments count as received.');
+assert.equal(window.document.querySelector('#paid-count').textContent, '1');
+window.arusPayApi.clearInvoices();
 window.navigate('profile');
 assert.equal(window.document.querySelector('#profile-view').classList.contains('hidden'), false);
 assert.match(window.document.querySelector('#linked-account-list').textContent, /smoke@example\.test/);

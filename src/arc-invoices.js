@@ -13,6 +13,9 @@ import {
 const ARC_TESTNET_ID = 5042002;
 const ARC_RPC = 'https://rpc.testnet.arc.io';
 const CONTRACT_ADDRESS = getAddress('0x0cc3b91Fc603Ef15d80B3C0e8DB222e5988b8926');
+// The contract was deployed at block 71546111; Arc limits eth_getLogs ranges to 10,000 blocks.
+const CONTRACT_START_BLOCK = BigInt(import.meta.env.VITE_ARUSPAY_DEPLOYMENT_BLOCK || '71546111');
+const LOG_BLOCK_RANGE = 9999n;
 const EXPLORER = 'https://explorer.testnet.arc.io';
 const STATUS = { none: 0, open: 1, paid: 2, cancelled: 3 };
 
@@ -225,6 +228,119 @@ async function getOnchainInvoice(merchant, invoiceId) {
   return readInvoiceResult(result);
 }
 
+async function getMerchantEventLogs(eventName, merchant, latestBlock) {
+  const event = invoiceAbi.find((item) => item.type === 'event' && item.name === eventName);
+  if (!event) throw new Error(`The ${eventName} event is not configured.`);
+  const logs = [];
+  for (let fromBlock = CONTRACT_START_BLOCK; fromBlock <= latestBlock;) {
+    const toBlock = fromBlock + LOG_BLOCK_RANGE - 1n < latestBlock
+      ? fromBlock + LOG_BLOCK_RANGE - 1n
+      : latestBlock;
+    const page = await publicClient.getLogs({
+      address: CONTRACT_ADDRESS,
+      event,
+      args: { merchant },
+      fromBlock,
+      toBlock,
+    });
+    logs.push(...page);
+    fromBlock = toBlock + 1n;
+  }
+  return logs;
+}
+
+async function getOptionalBlockTimestamp(log, timestampCache) {
+  if (log.blockNumber === null || log.blockNumber === undefined) return null;
+  const key = log.blockNumber.toString();
+  if (!timestampCache.has(key)) {
+    timestampCache.set(key, publicClient.getBlock({ blockNumber: log.blockNumber })
+      .then((block) => new Date(Number(block.timestamp) * 1000).toISOString()));
+  }
+  try {
+    return await timestampCache.get(key);
+  } catch {
+    timestampCache.delete(key);
+    return null;
+  }
+}
+
+async function syncMerchantInvoices(merchantAddress) {
+  const merchant = getAddress(merchantAddress);
+  const chainId = await publicClient.getChainId();
+  if (chainId !== ARC_TESTNET_ID) throw new Error('Arc Testnet could not be verified. Invoice data was not updated.');
+  const latestBlock = await publicClient.getBlockNumber();
+  const [createdLogs, paidLogs] = await Promise.all([
+    getMerchantEventLogs('InvoiceCreated', merchant, latestBlock),
+    getMerchantEventLogs('InvoicePaid', merchant, latestBlock),
+  ]);
+  const paidByInvoice = new Map();
+  for (const log of paidLogs) {
+    const args = log.args;
+    if (!args?.invoiceId || args.merchant?.toLowerCase() !== merchant.toLowerCase()) continue;
+    const key = args.invoiceId.toLowerCase();
+    if (paidByInvoice.has(key)) throw new Error('Arc returned duplicate payment events; invoice data was not updated.');
+    paidByInvoice.set(key, log);
+  }
+
+  const previousInvoices = window.arusPayApi?.getInvoices() || [];
+  const previousById = new Map(previousInvoices
+    .filter((item) => item.invoiceId)
+    .map((item) => [item.invoiceId.toLowerCase(), item]));
+  const timestampCache = new Map();
+  const synced = [];
+  for (const createdLog of createdLogs) {
+    const created = createdLog.args;
+    if (!created?.invoiceId || created.merchant?.toLowerCase() !== merchant.toLowerCase()) continue;
+    const invoiceId = created.invoiceId;
+    const key = invoiceId.toLowerCase();
+    const known = previousById.get(key);
+    const invoice = await getOnchainInvoice(merchant, invoiceId);
+    if (invoice.status === STATUS.none
+      || invoice.amount !== BigInt(created.amount)
+      || invoice.expiresAt !== BigInt(created.expiresAt)) {
+      throw new Error('Arc invoice event and current contract state do not match. Invoice data was not updated.');
+    }
+
+    const paymentLog = paidByInvoice.get(key);
+    if (invoice.status === STATUS.paid) {
+      if (!paymentLog || BigInt(paymentLog.args.amount) !== invoice.amount
+        || paymentLog.args.merchant?.toLowerCase() !== merchant.toLowerCase()) {
+        throw new Error('A paid invoice is missing its matching Arc payment event. Payment totals were not updated.');
+      }
+    } else if (paymentLog) {
+      throw new Error('Arc returned a payment event for an invoice that is not paid. Payment totals were not updated.');
+    }
+
+    const createdAt = await getOptionalBlockTimestamp(createdLog, timestampCache);
+    const paidAt = paymentLog ? await getOptionalBlockTimestamp(paymentLog, timestampCache) : null;
+    const humanStatus = statusText(invoice.status, invoice.expiresAt).toLowerCase();
+    synced.push({
+      ...known,
+      id: known?.id || `INV-${invoiceId.slice(2, 10).toUpperCase()}`,
+      invoiceId,
+      merchant,
+      amount: Number(formatUnits(invoice.amount, 18)),
+      amountBase: invoice.amount.toString(),
+      due: invoice.expiresAt === 0n ? '' : new Date(Number(invoice.expiresAt) * 1000).toISOString().slice(0, 10),
+      name: known?.name || 'On-chain invoice',
+      description: known?.description || 'On-chain invoice',
+      initials: known?.initials || 'AP',
+      status: humanStatus,
+      createdAt: createdAt || known?.createdAt || null,
+      createTxHash: createdLog.transactionHash,
+      explorerUrl: `${EXPLORER}/tx/${createdLog.transactionHash}`,
+      ...(paymentLog ? {
+        payer: paymentLog.args.payer,
+        paidAt: paidAt || known?.paidAt || null,
+        paymentTxHash: paymentLog.transactionHash,
+        paymentExplorerUrl: `${EXPLORER}/tx/${paymentLog.transactionHash}`,
+      } : {}),
+      onchainVerified: true,
+    });
+  }
+  return synced.reverse();
+}
+
 async function estimateFee(functionName, args, account, value) {
   const gas = await publicClient.estimateContractGas({
     account,
@@ -329,6 +445,7 @@ async function createOnchainInvoice() {
       merchant: account,
       createTxHash: hash,
       explorerUrl: `${EXPLORER}/tx/${hash}`,
+      onchainVerified: true,
     };
     window.arusPayApi?.addInvoice(record);
     form.reset();
@@ -430,6 +547,7 @@ async function payInvoice(merchant, invoiceId, amount) {
       payer: account,
       paymentTxHash: hash,
       paymentExplorerUrl: `${EXPLORER}/tx/${hash}`,
+      onchainVerified: true,
     });
     await renderPayment();
     showToast('Payment confirmed on Arc Testnet.');
@@ -466,10 +584,96 @@ async function openSharedInvoice(merchant, invoiceId) {
 
 window.arusPayUpdatePayment = renderPayment;
 window.arusPayCreateInvoice = createOnchainInvoice;
+let activeWalletAddress = null;
+let dashboardSyncRequest = 0;
+
+function setWalletBalance(value, message, error = '') {
+  const balance = $('#wallet-balance');
+  const status = $('#wallet-balance-state');
+  if (balance) balance.textContent = value;
+  if (status) {
+    status.textContent = message;
+    status.title = error;
+  }
+}
+
+function setInvoiceSyncStatus(message, error = '') {
+  const status = $('#invoice-sync-status');
+  if (!status) return;
+  status.textContent = message;
+  status.title = error;
+}
+
+async function refreshArcDashboard(address = activeWalletAddress) {
+  if (!address) return;
+  const safeAddress = getAddress(address);
+  activeWalletAddress = safeAddress;
+  const request = ++dashboardSyncRequest;
+  const refreshButton = $('#refresh-chain-sync');
+  if (refreshButton) refreshButton.disabled = true;
+  setWalletBalance('—', 'Reading Arc Testnet…');
+  setInvoiceSyncStatus('Syncing invoice events from Arc Testnet…');
+
+  const verifiedChain = publicClient.getChainId().then((chainId) => {
+    if (chainId !== ARC_TESTNET_ID) throw new Error('The RPC endpoint returned an unexpected chain ID.');
+  });
+  const [balanceResult, invoicesResult] = await Promise.allSettled([
+    verifiedChain.then(() => publicClient.getBalance({ address: safeAddress })),
+    verifiedChain.then(() => syncMerchantInvoices(safeAddress)),
+  ]);
+  if (request !== dashboardSyncRequest) return;
+
+  if (balanceResult.status === 'fulfilled') {
+    setWalletBalance(formatUsdc(balanceResult.value), 'Native USDC balance · Arc Testnet');
+  } else {
+    const message = balanceResult.reason?.shortMessage || balanceResult.reason?.message || 'Arc Testnet balance could not be read.';
+    setWalletBalance('—', 'Balance unavailable · refresh to retry', message);
+  }
+
+  if (invoicesResult.status === 'fulfilled') {
+    const syncedInvoices = invoicesResult.value;
+    window.arusPayApi?.replaceInvoices(syncedInvoices);
+    setInvoiceSyncStatus(syncedInvoices.length
+      ? `${syncedInvoices.length} invoice${syncedInvoices.length === 1 ? '' : 's'} synced from Arc Testnet.`
+      : 'No invoice events found for this wallet on Arc Testnet.');
+  } else {
+    const message = invoicesResult.reason?.shortMessage || invoicesResult.reason?.message || 'Arc Testnet invoices could not be read.';
+    setInvoiceSyncStatus('Invoice sync unavailable · refresh to retry', message);
+  }
+
+  if (refreshButton) refreshButton.disabled = false;
+}
+
+window.arusPayRefreshSync = () => refreshArcDashboard();
+$('#refresh-chain-sync')?.addEventListener('click', () => {
+  if (activeWalletAddress) void refreshArcDashboard(activeWalletAddress);
+});
+
 window.arusPayWalletChanged = (wallets = []) => {
   const wallet = wallets.find((item) => item.chainType === 'ethereum' || item.chainType === 'evm');
-  if (wallet?.address) showWalletStatus(wallet.address);
-  else if (window.arusPayAuthenticatedState) showWalletStatus('', 'Wallet not connected');
+  if (wallet?.address) {
+    try {
+      const nextAddress = getAddress(wallet.address);
+      if (activeWalletAddress && activeWalletAddress.toLowerCase() !== nextAddress.toLowerCase()) {
+        window.arusPayApi?.clearInvoices(new URL(window.location.href).searchParams.has('invoiceId'));
+      }
+      activeWalletAddress = nextAddress;
+      showWalletStatus(activeWalletAddress);
+      void refreshArcDashboard(activeWalletAddress);
+    } catch {
+      activeWalletAddress = null;
+      setWalletBalance('—', 'Privy returned an invalid wallet address.');
+      setInvoiceSyncStatus('Invoice sync unavailable · check the connected wallet.');
+    }
+    return;
+  }
+  activeWalletAddress = null;
+  dashboardSyncRequest += 1;
+  const refreshButton = $('#refresh-chain-sync');
+  if (refreshButton) refreshButton.disabled = false;
+  showWalletStatus('', window.arusPayAuthenticatedState ? 'Wallet not connected' : '');
+  setWalletBalance('—', 'Connect a Privy wallet to read its balance.');
+  setInvoiceSyncStatus('Connect a Privy wallet to sync Arc invoices.');
 };
 
 const url = new URL(window.location.href);
