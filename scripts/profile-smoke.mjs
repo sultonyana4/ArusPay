@@ -150,5 +150,26 @@ assert.equal(window.document.querySelector('[data-export-wallet]'), null, 'Exter
 window.arusPayUnauthenticated();
 assert.equal(window.document.querySelector('#signin').classList.contains('hidden'), false);
 
-console.log('PASS: profile route, linked identities, copy address, local-only name, user isolation, X-link gating, export confirmation/cancel, and embedded-wallet-only empty states.');
+const invoiceId = `0x${'cf1f8e1b52d52d06e7c7eaa3383e5164c73b3a5bf1f9fd82b5e92261a4fca598'}`;
+const merchant = '0x4D3e3dc6D280cDd8Ba520F8E4B9AC3BF762BBDFe';
+const linkDom = new JSDOM(html, {
+  url: `https://aruspay-pi.vercel.app/?merchant=${merchant}&invoiceId=${invoiceId}`,
+  runScripts: 'outside-only',
+  pretendToBeVisual: true,
+});
+for (const script of linkDom.window.document.querySelectorAll('script:not([src])')) {
+  if (script.textContent) linkDom.window.eval(script.textContent);
+}
+const linkedInvoice = { id: 'INV-CF1F8E1B', invoiceId, merchant, amount: 0.1, amountBase: '100000000000000000', status: 'open' };
+linkDom.window.arusPayApi.openInvoice(linkedInvoice);
+linkDom.window.arusPayAuthenticated({ id: 'did:privy:existing-session', linkedAccounts: [] }, []);
+assert.equal(linkDom.window.document.querySelector('#payment').classList.contains('hidden'), false, 'An existing Privy session must not redirect a payment link to the dashboard.');
+assert.equal(linkDom.window.document.querySelector('#workspace').classList.contains('hidden'), true, 'The merchant dashboard must stay hidden for a payer link.');
+assert.equal(linkDom.window.arusPayApi.getSelectedInvoice().invoiceId, invoiceId, 'The linked invoice selection must survive session restoration.');
+linkDom.window.arusPayUnauthenticated();
+assert.equal(linkDom.window.document.querySelector('#payment').classList.contains('hidden'), false, 'Signing out must not hide a public invoice payment page.');
+assert.equal(linkDom.window.arusPayApi.getSelectedInvoice().invoiceId, invoiceId, 'The linked invoice selection must survive sign-out.');
+linkDom.window.close();
+
+console.log('PASS: profile route, linked identities, copy address, local-only name, user isolation, X-link gating, export confirmation/cancel, embedded-wallet-only empty states, and payment-link routing across Privy session callbacks.');
 dom.window.close();
