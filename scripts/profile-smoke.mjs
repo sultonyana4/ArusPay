@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { selectWalletsForOnchainSync, waitForConnectedEthereumProvider } from '../src/privy-wallets.js';
+import { isExpectedHexChainId, selectWalletsForOnchainSync, waitForConnectedEthereumProvider, withTimeout } from '../src/privy-wallets.js';
 
 const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
 const arcSyncSource = await readFile(new URL('../src/arc-invoices.js', import.meta.url), 'utf8');
@@ -12,11 +12,18 @@ assert.match(sharedInvoiceSource, /window\.arusPayApi\?\.openInvoice/, 'A valid 
 assert.doesNotMatch(sharedInvoiceSource, /await\s+getOnchainInvoice/, 'Payment-link selection must not wait for the chain before rendering the loading state.');
 assert.match(arcSyncSource, /requestId !== paymentRenderRequest/, 'Late RPC results must not overwrite a newer payment view.');
 assert.match(arcSyncSource, /Connect wallet to pay/, 'An invoice must show a wallet connection action without hiding its on-chain details.');
-assert.match(arcSyncSource, /Privy recognizes this embedded wallet, but its connected provider is not available/, 'A linked wallet without an active provider must not be treated as a ready signer.');
+assert.match(arcSyncSource, /The connected wallet provider could not be verified on Arc Testnet/, 'A linked wallet without a verified provider must not be treated as ready.');
 assert.match(arcSyncSource, /Retry Privy connection/, 'The read-only provider check must be separately retryable.');
 assert.match(arcSyncSource, /Signing has not been tested here/, 'A read-only provider probe must not claim that signing was tested.');
 assert.match(privyAuthSource, /ready: walletsAreReady/, 'Provider lookup must wait for Privy useWallets readiness.');
 assert.match(privyAuthSource, /waitForConnectedEthereumProvider/, 'Provider lookup must use the readiness-aware wallet helper.');
+assert.match(arcSyncSource, /withTimeout\([\s\S]*?method: 'eth_chainId'/, 'The actual read-only chain probe must have a deadline.');
+assert.match(arcSyncSource, /within 12 seconds[\s\S]*Tap \$\{retryAction\}/, 'Timeouts must explain the failure and the available retry action.');
+assert.match(arcSyncSource, /isExpectedHexChainId\(chainId, ARC_TESTNET_ID\)/, 'A provider is not ready unless it proves the Arc Testnet chain ID.');
+assert.match(arcSyncSource, /if \(activeWalletAddress && !providerVerified\) \{\s*paymentButton\.disabled = true;/, 'Pay remains disabled until the wallet network check succeeds.');
+assert.match(arcSyncSource, /if \(activeWalletAddress && \(activeWalletProviderState !== 'connected' \|\| !activeWalletProviderReady\)\) return;/, 'The click handler independently blocks payment without a verified provider.');
+assert.match(arcSyncSource, /retryButton\.addEventListener\('click', \(\) => void checkActiveWalletProvider\(/, 'The retry control must start a fresh read-only provider check.');
+assert.match(arcSyncSource, /if \(activeWalletProviderState !== 'checking'\) \{\s*const retryButton = document\.createElement\('button'\)/, 'The retry action appears after a check ends, avoiding a duplicate disabled checking button.');
 assert.doesNotMatch(privyAuthSource, /Date\.now\(\) \+ 2000/, 'A fixed two-second wallet restoration window must not return early.');
 assert.ok(arcSyncSource.includes('paymentButton.disabled = true;'), 'Payment stays disabled until the Privy provider passes a read-only check.');
 assert.ok(arcSyncSource.includes("method: 'eth_chainId'"), 'The connection probe must be read-only.');
@@ -69,7 +76,10 @@ assert.deepEqual(selectWalletsForOnchainSync([], { linkedAccounts: [{ address, w
 const activeExternalWallet = { address, walletClientType: 'metamask', chainType: 'ethereum' };
 assert.deepEqual(selectWalletsForOnchainSync([activeExternalWallet], user), [activeExternalWallet], 'An actively connected EVM wallet remains preferred for invoice sync.');
 
-const provider = { request: async ({ method }) => method === 'eth_chainId' ? '0x4ce2b2' : null };
+const provider = { request: async ({ method }) => method === 'eth_chainId' ? '0x4cef52' : null };
+assert.equal(isExpectedHexChainId('0x4cef52', 5042002), true, 'Arc Testnet chain ID is accepted.');
+assert.equal(isExpectedHexChainId('0x1', 5042002), false, 'A valid but different chain ID is rejected.');
+assert.equal(isExpectedHexChainId('not-a-chain', 5042002), false, 'Malformed chain IDs are rejected.');
 let providerWallets = [];
 let walletsAreReady = false;
 const providerWait = waitForConnectedEthereumProvider({
@@ -127,6 +137,26 @@ const externalProvider = await waitForConnectedEthereumProvider({
   retryIntervalMs: 2,
 });
 assert.equal(externalProvider, unrelatedProvider, 'A non-embedded connected wallet can use the injected provider fallback.');
+
+const startedAt = Date.now();
+const neverSettlingProvider = await waitForConnectedEthereumProvider({
+  getWallets: () => [{
+    ...wallets[0],
+    getEthereumProvider: () => new Promise(() => {}),
+  }],
+  isReady: () => true,
+  address,
+  walletClientType: 'privy',
+  timeoutMs: 30,
+  retryIntervalMs: 2,
+});
+assert.equal(neverSettlingProvider, null, 'A Privy provider getter that never settles must end the readiness check.');
+assert.ok(Date.now() - startedAt < 500, 'The provider getter timeout must be bounded.');
+await assert.rejects(
+  withTimeout(() => new Promise(() => {}), 30, 'read-only probe timed out'),
+  /read-only probe timed out/,
+  'A hung eth_chainId request must time out instead of leaving the UI in checking state.',
+);
 
 window.arusPayAuthenticated(user, embeddedFallback);
 assert.equal(walletSyncCalls.at(-1)?.[0]?.address, address, 'The embedded fallback is passed to the Arc sync hook.');

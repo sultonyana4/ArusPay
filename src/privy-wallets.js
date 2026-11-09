@@ -6,6 +6,23 @@ export function isPrivyWalletClientType(walletClientType) {
   return PRIVY_WALLET_CLIENT_TYPES.has(walletClientType);
 }
 
+export function isExpectedHexChainId(chainId, expectedChainId) {
+  return typeof chainId === 'string'
+    && /^0x[0-9a-f]+$/i.test(chainId)
+    && Number.parseInt(chainId, 16) === expectedChainId;
+}
+
+export function withTimeout(operation, timeoutMs, message = 'The operation timed out.') {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), Math.max(0, timeoutMs));
+  });
+  return Promise.race([
+    Promise.resolve().then(() => typeof operation === 'function' ? operation() : operation),
+    timeout,
+  ]).finally(() => clearTimeout(timer));
+}
+
 function isEvmWallet(wallet) {
   return Boolean(
     wallet &&
@@ -68,7 +85,13 @@ export async function waitForConnectedEthereumProvider({
 
       if (wallet) {
         try {
-          const provider = await wallet.getEthereumProvider();
+          const remainingMs = deadline - Date.now();
+          if (remainingMs <= 0) break;
+          const provider = await withTimeout(
+            () => wallet.getEthereumProvider(),
+            remainingMs,
+            'Privy provider lookup timed out.',
+          );
           if (provider && typeof provider.request === 'function') return provider;
         } catch {
           // Privy's secure wallet connection can still be initializing; retry until the deadline.
