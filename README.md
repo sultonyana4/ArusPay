@@ -5,7 +5,8 @@ A responsive invoice workflow connected to the deployed `ArusPayInvoices` contra
 ## Arc Testnet configuration
 
 - Chain ID: `5042002`
-- RPC: `https://rpc.testnet.arc.io`
+- Browser RPC default: `https://rpc.blockdaemon.testnet.arc.io` (an Arc-documented Testnet provider with browser CORS support)
+- Arc primary RPC: `https://rpc.testnet.arc.io`
 - Explorer: `https://explorer.testnet.arc.io`
 - Deployed invoice contract: `0x0cc3b91Fc603Ef15d80B3C0e8DB222e5988b8926`
 - Native gas and payment asset: USDC with 18 decimal places
@@ -36,6 +37,7 @@ Set `VITE_PRIVY_APP_ID` in a local `.env` file to override the public Privy app 
 
 - `createInvoice(bytes32,uint256,uint64)` records the merchant, exact native-USDC amount, and expiry on Arc Testnet. Invoice IDs are random opaque values and do not contain client information.
 - The app validates a confirmed `InvoiceCreated` receipt/event before showing an invoice as created.
+- Browser requests default to Arc's documented Blockdaemon Testnet endpoint because the primary Testnet RPC blocks CORS requests from Vercel preview origins; `VITE_ARUSPAY_BROWSER_RPC_URL` can override this transport without changing the chain or contract.
 - The dashboard reads the connected Privy wallet's native USDC balance with `eth_getBalance` (18 decimals), and syncs the wallet's invoice events from the contract deployment block in ranges below Arc's 10,000-block `eth_getLogs` limit. It then reads each invoice's current contract state. Refreshing is read-only and submits no transaction.
 - `Total received` and `Confirmed payments` include only invoices whose current contract state is `Paid` and whose matching `InvoicePaid` event has the exact amount and merchant. A faucet balance appears only under `Wallet balance`; it is not revenue.
 - A payment link contains only the merchant address and invoice ID. Client name, email, description, and note remain off-chain in the current browser session; no email or backend delivery is configured.

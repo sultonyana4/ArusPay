@@ -11,7 +11,7 @@ import {
 } from 'viem';
 
 const ARC_TESTNET_ID = 5042002;
-const ARC_RPC = 'https://rpc.testnet.arc.io';
+const ARC_RPC = import.meta.env.VITE_ARUSPAY_BROWSER_RPC_URL || 'https://rpc.blockdaemon.testnet.arc.io';
 const CONTRACT_ADDRESS = getAddress('0x0cc3b91Fc603Ef15d80B3C0e8DB222e5988b8926');
 // The contract was deployed at block 71546111; Arc limits eth_getLogs ranges to 10,000 blocks.
 const CONTRACT_START_BLOCK = BigInt(import.meta.env.VITE_ARUSPAY_DEPLOYMENT_BLOCK || '71546111');

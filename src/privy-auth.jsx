@@ -3,11 +3,12 @@ import { createRoot } from 'react-dom/client';
 import { PrivyProvider, useExportWallet, useLinkAccount, useLogin, usePrivy, useWallets } from '@privy-io/react-auth';
 import { defineChain } from 'viem';
 
+const ARC_RPC = import.meta.env.VITE_ARUSPAY_BROWSER_RPC_URL || 'https://rpc.blockdaemon.testnet.arc.io';
 const arcTestnet = defineChain({
   id: 5042002,
   name: 'Arc Testnet',
   nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
-  rpcUrls: { default: { http: ['https://rpc.testnet.arc.io'] } },
+  rpcUrls: { default: { http: [ARC_RPC] } },
   blockExplorers: { default: { name: 'Arc Testnet Explorer', url: 'https://explorer.testnet.arc.io' } },
   testnet: true,
 });
