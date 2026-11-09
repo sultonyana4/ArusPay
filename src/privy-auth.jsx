@@ -7,11 +7,13 @@ const ARC_TESTNET_ID = 5042002;
 const configuredChainId = Number(import.meta.env.VITE_ARUSPAY_CHAIN_ID || ARC_TESTNET_ID);
 if (configuredChainId !== ARC_TESTNET_ID) throw new Error('This preview is locked to Arc Testnet (chain ID 5042002).');
 
+const ARC_RPC = import.meta.env.VITE_ARUSPAY_BROWSER_RPC_URL || 'https://rpc.blockdaemon.testnet.arc.io';
+
 const arcTestnet = defineChain({
   id: ARC_TESTNET_ID,
   name: 'Arc Testnet',
   nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
-  rpcUrls: { default: { http: ['https://rpc.testnet.arc.io'] } },
+  rpcUrls: { default: { http: [ARC_RPC] } },
   blockExplorers: { default: { name: 'Arc Testnet Explorer', url: 'https://explorer.testnet.arc.io' } },
   testnet: true,
 });
