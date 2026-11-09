@@ -5,7 +5,8 @@ A responsive invoice workflow connected to the deployed `ArusPayInvoices` contra
 ## Arc Testnet configuration
 
 - Chain ID: `5042002`
-- RPC: `https://rpc.testnet.arc.io`
+- Browser RPC default: `https://rpc.blockdaemon.testnet.arc.io` (an Arc-documented Testnet provider with browser CORS support)
+- Arc primary RPC: `https://rpc.testnet.arc.io`
 - Explorer: `https://explorer.testnet.arc.io`
 - Deployed invoice contract: `0x0cc3b91Fc603Ef15d80B3C0e8DB222e5988b8926`
 - Native gas and payment asset: USDC with 18 decimal places
@@ -30,12 +31,15 @@ npm run build
 npm run preview
 ```
 
-Set `VITE_PRIVY_APP_ID` in a local `.env` file to override the public Privy app ID used by the prototype.
+Copy `.env.example` to `.env` for local setup. Vite variables are public client configuration only; never put a Supabase service-role key, wallet private key, or other secret in a `VITE_` variable.
 
 ## Invoice and payment flow
 
 - `createInvoice(bytes32,uint256,uint64)` records the merchant, exact native-USDC amount, and expiry on Arc Testnet. Invoice IDs are random opaque values and do not contain client information.
 - The app validates a confirmed `InvoiceCreated` receipt/event before showing an invoice as created.
+- Browser requests default to Arc's documented Blockdaemon Testnet endpoint because the primary Testnet RPC blocks CORS requests from Vercel preview origins; `VITE_ARUSPAY_BROWSER_RPC_URL` can override this transport without changing the chain or contract.
+- The dashboard reads the connected Privy wallet's native USDC balance with `eth_getBalance` (18 decimals), and syncs the wallet's invoice events from the contract deployment block in ranges below Arc's 10,000-block `eth_getLogs` limit. It then reads each invoice's current contract state. Refreshing is read-only and submits no transaction.
+- `Total received` and `Confirmed payments` include only invoices whose current contract state is `Paid` and whose matching `InvoicePaid` event has the exact amount and merchant. A faucet balance appears only under `Wallet balance`; it is not revenue.
 - A payment link contains only the merchant address and invoice ID. Client name, email, description, and note remain off-chain in the current browser session; no email or backend delivery is configured.
 - `payInvoice(address,bytes32)` submits the exact invoice value as native USDC. The app validates the successful receipt and matching `InvoicePaid` event, then checks the contract state before showing the invoice as paid.
 - The connected wallet pays its own Arc Testnet USDC gas fees. No gas sponsorship, relayer, or token approval is used.
@@ -45,11 +49,12 @@ Set `VITE_PRIVY_APP_ID` in a local `.env` file to override the public Privy app 
 
 - The Profile page uses the authenticated Privy user and linked accounts returned by Privy. It shows a wallet address only when Privy returns an embedded EVM wallet; the address can be copied from the page.
 - X/Twitter linking uses Privy's authenticated-user account-link flow. It links X to the current Privy user rather than starting a new sign-in flow.
-- Display names are stored in this browser's local storage, scoped to the Privy user ID. There is no backend profile service, so names are not synced to other browsers or devices.
+- Display names are synced through the `aruspay-api` Supabase Edge Function. The function verifies the Privy access-token signature and claims, then reads or updates only the profile row whose ID matches the verified Privy subject. Legacy browser-only names are migrated only after the server confirms the save.
+- Supabase tables keep row-level security enabled without browser-access policies. The service-role key is used only by the Edge Function at runtime and must never be added to Vercel client variables, browser code, or source control.
 - Private-key export is started only after the user confirms an on-screen safety warning, then handled by Privy's own export modal. ArusPay does not retrieve, receive, log, or store the private key. Anyone who obtains the key can control the wallet.
 - The profile flow performs no on-chain transactions.
 
-Run the safe profile smoke test with `npm run test:profile`. It exercises the UI in isolated JSDOM fixtures with mocked Privy methods, including account rendering, copy actions, local-only name storage, X-link gating, key-export confirmation/cancel, and empty states. It does not authenticate a real user, reveal a private key, or send transactions. Live X authorization and the Privy export modal should be verified from the account owner's own signed-in session.
+Run the safe profile smoke test with `npm run test:profile`. It exercises the UI in isolated JSDOM fixtures with mocked API responses, including cloud profile read/write, account isolation, legacy-name migration, failed-save handling, copy actions, X-link gating, key-export confirmation/cancel, and empty states. It does not authenticate a real user, reveal a private key, or send transactions. Live X authorization, profile sync, and the Privy export modal should be verified from the account owner's own signed-in session.
 
 The preview should remain testnet-only until a separate, explicit mainnet launch decision and production review.
 
