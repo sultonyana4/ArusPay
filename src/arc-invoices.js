@@ -18,6 +18,7 @@ import {
   walletDiagnosticsNextStep,
 } from './privy-diagnostics.js';
 import {
+  createPaymentSubmissionGate,
   getPaymentDisplayState,
   isAmbiguousPaymentError,
   pollPaymentReconciliation,
@@ -38,6 +39,7 @@ const STATUS = { none: 0, open: 1, paid: 2, cancelled: 3 };
 const uncertainPaymentAttempts = new Map();
 const paymentReconciliationWatchers = new Map();
 const paymentReconciliationWatchComplete = new Set();
+const runPaymentSubmissionIfIdle = createPaymentSubmissionGate();
 let metadataSyncUnavailable = false;
 
 const arcTestnet = defineChain({
@@ -893,14 +895,14 @@ async function renderPayment() {
       const stateMessage = document.createElement('p');
       stateMessage.className = 'hint';
       stateMessage.textContent = paymentReconciliation?.status === 'pending'
-        ? 'The contract still reports Open, and a matching transaction is pending. No second payment was submitted. Wait for its receipt or check status again.'
+        ? 'The contract still reports Open, but a matching payment transaction is pending. If Privy’s wallet popup still shows an error, close it with X—do not tap “Retry transaction” or approve again. Leave this page open while ArusPay checks the receipt; no second payment is being submitted.'
         : paymentReconciliation?.status === 'unavailable'
           ? paymentReconciliationWatchers.has(paymentAttemptKey(selected.merchant, selected.invoiceId))
-            ? 'The last payment request has an uncertain result. ArusPay is retrying read-only contract checks; no second payment is being submitted.'
-            : 'The last payment request has an uncertain result, and the contract could not be re-read. No second payment is available; check the contract status again when the RPC responds.'
+            ? 'The last payment request has an uncertain result. If Privy’s wallet popup still shows an error, close it with X—do not tap “Retry transaction” or approve again. Leave this page open; ArusPay is checking the contract and payment events without submitting another payment.'
+            : 'The last payment request has an uncertain result, and the contract could not be re-read. Close any Privy error popup with X—do not tap “Retry transaction” or approve again. No second payment is available; leave this page open and check status again when the RPC responds.'
           : paymentReconciliationWatchers.has(paymentAttemptKey(selected.merchant, selected.invoiceId))
-            ? 'Privy’s wallet error or nonce message is ambiguous and does not prove payment failed. ArusPay is checking the contract and matching payment events automatically; no second payment is being submitted.'
-            : 'Privy’s wallet error or nonce message is ambiguous and does not prove payment failed. The invoice still reads Open, so no second payment is available while the result remains uncertain; check status again.';
+            ? 'Privy’s wallet error or nonce message does not prove payment failed. Close the popup with X—do not tap “Retry transaction” or approve again. Leave this page open; ArusPay is checking the contract and matching payment events automatically, with payment locked.'
+            : 'Privy’s wallet error or nonce message does not prove payment failed. Close the popup with X—do not tap “Retry transaction” or approve again. The invoice still reads Open, so payment remains locked while ArusPay checks again.';
       resultPanel.append(stateMessage);
       if (paymentReconciliation?.status === 'pending' && paymentReconciliation.paymentTxHash) {
         const pendingLink = document.createElement('a');
@@ -1016,146 +1018,145 @@ async function renderPayment() {
 
 async function payInvoice(merchant, invoiceId, amount) {
   const button = $('#pay-onchain');
-  if (paymentSubmissionInProgress) return;
-  if (getUncertainPaymentAttempt(merchant, invoiceId)) {
-    showToast('A previous payment result is still uncertain. Check status and wallet activity; no second transaction was submitted.');
-    await renderPayment();
-    return;
-  }
-  paymentSubmissionInProgress = true;
-  if (button) button.disabled = true;
-  let account = activeWalletAddress;
-  try {
-    const wallet = await getWallet();
-    account = wallet.account;
-    const current = await getOnchainInvoice(merchant, invoiceId);
-    if (current.status !== STATUS.open) throw new Error(`This invoice is ${statusText(current.status, current.expiresAt).toLowerCase()} and cannot be paid.`);
-    if (current.expiresAt !== 0n && current.expiresAt <= BigInt(Math.floor(Date.now() / 1000))) throw new Error('This invoice has expired.');
-    if (current.amount !== BigInt(amount)) throw new Error('The displayed amount no longer matches the on-chain invoice. Review the updated invoice before paying.');
-    const fee = await estimateFee('payInvoice', [getAddress(merchant), invoiceId], account, current.amount);
-    showToast(`Review wallet confirmation for ${formatUsdc(amount)} USDC plus an estimated ${formatUsdc(fee.fee)} USDC network fee.`);
-    const attempt = await submitPaymentOnce({
-      submit: () => wallet.walletClient.writeContract({
-        account,
-        address: CONTRACT_ADDRESS,
-        abi: invoiceAbi,
-        functionName: 'payInvoice',
-        args: [getAddress(merchant), invoiceId],
-        value: current.amount,
-      }),
-      waitForReceipt: (hash) => publicClient.waitForTransactionReceipt({ hash, timeout: 45000, pollingInterval: 1500 }),
-      reconcile: ({ transactionHash, receiptHint, error }) => reconcileOnchainPayment({
-        merchant,
-        invoiceId,
-        amount: current.amount,
-        payer: account,
-        transactionHash,
-        receiptHint,
-        error,
-      }),
-    });
-    const outcome = attempt.result;
-    if (outcome.status === 'paid') {
-      if (outcome.contractStatePending || (outcome.proofUnavailable && !outcome.paymentTxHash)) {
+  return runPaymentSubmissionIfIdle(async () => {
+    if (getUncertainPaymentAttempt(merchant, invoiceId)) {
+      showToast('A previous payment result is still uncertain. Close any Privy error popup with X—do not tap “Retry transaction” or approve again. Check status; no second transaction was submitted.');
+      await renderPayment();
+      return;
+    }
+    if (button) button.disabled = true;
+    let account = activeWalletAddress;
+    try {
+      const wallet = await getWallet();
+      account = wallet.account;
+      const current = await getOnchainInvoice(merchant, invoiceId);
+      if (current.status !== STATUS.open) throw new Error(`This invoice is ${statusText(current.status, current.expiresAt).toLowerCase()} and cannot be paid.`);
+      if (current.expiresAt !== 0n && current.expiresAt <= BigInt(Math.floor(Date.now() / 1000))) throw new Error('This invoice has expired.');
+      if (current.amount !== BigInt(amount)) throw new Error('The displayed amount no longer matches the on-chain invoice. Review the updated invoice before paying.');
+      const fee = await estimateFee('payInvoice', [getAddress(merchant), invoiceId], account, current.amount);
+      showToast(`Review wallet confirmation for ${formatUsdc(amount)} USDC plus an estimated ${formatUsdc(fee.fee)} USDC network fee.`);
+      const attempt = await submitPaymentOnce({
+        submit: () => wallet.walletClient.writeContract({
+          account,
+          address: CONTRACT_ADDRESS,
+          abi: invoiceAbi,
+          functionName: 'payInvoice',
+          args: [getAddress(merchant), invoiceId],
+          value: current.amount,
+        }),
+        waitForReceipt: (hash) => publicClient.waitForTransactionReceipt({ hash, timeout: 45000, pollingInterval: 1500 }),
+        reconcile: ({ transactionHash, receiptHint, error }) => reconcileOnchainPayment({
+          merchant,
+          invoiceId,
+          amount: current.amount,
+          payer: account,
+          transactionHash,
+          receiptHint,
+          error,
+        }),
+      });
+      const outcome = attempt.result;
+      if (outcome.status === 'paid') {
+        if (outcome.contractStatePending || (outcome.proofUnavailable && !outcome.paymentTxHash)) {
+          setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash || attempt.transactionHash, amount);
+        } else {
+          clearUncertainPaymentAttempt(merchant, invoiceId);
+        }
+        window.arusPayApi?.updateInvoice(invoiceId, {
+          status: 'paid',
+          ...(outcome.payer ? { payer: outcome.payer } : {}),
+          ...(outcome.paymentTxHash ? {
+            paidAt: new Date().toISOString(),
+            paymentTxHash: outcome.paymentTxHash,
+            paymentExplorerUrl: `${EXPLORER}/tx/${outcome.paymentTxHash}`,
+          } : {}),
+          onchainVerified: true,
+        });
+        await renderPayment();
+        showToast(outcome.contractStatePending
+          ? 'A matching InvoicePaid event and successful receipt confirm payment. The RPC contract-state read is catching up; no second payment is available.'
+          : outcome.paymentTxHash
+          ? `Paid on the ArusPay contract. Verified transaction: ${outcome.paymentTxHash}`
+          : 'The ArusPay contract confirms Paid, but the RPC has not returned a verifiable transaction hash. Check status again.');
+      } else if (outcome.status === 'reverted') {
+        clearUncertainPaymentAttempt(merchant, invoiceId);
+        await renderPayment();
+        showToast('The transaction reverted and the contract still reports Open. No replacement was sent; you can decide whether to start a new payment.');
+      } else if (outcome.status === 'pending') {
         setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash || attempt.transactionHash, amount);
-      } else {
+        await renderPayment();
+        showToast('A matching payment transaction is pending. No second transaction was sent; wait for its receipt or check status again.');
+      } else if (outcome.status === 'open' && !outcome.ambiguous && !attempt.ambiguous
+        && !isAmbiguousPaymentError(attempt.error)) {
         clearUncertainPaymentAttempt(merchant, invoiceId);
+        await renderPayment();
+        const reason = attempt.error?.shortMessage || attempt.error?.message;
+        showToast(reason
+          ? `The contract still reports Open. This attempt did not confirm a payment: ${reason}`
+          : 'The contract still reports Open. No payment was confirmed.');
+      } else if (outcome.status === 'not-open') {
+        clearUncertainPaymentAttempt(merchant, invoiceId);
+        await renderPayment();
+        showToast(`The contract reports ${statusText(outcome.invoice.status, outcome.invoice.expiresAt)}. No second payment was submitted.`);
+      } else {
+        const uncertain = Boolean(attempt.transactionHash || attempt.ambiguous || isAmbiguousPaymentError(attempt.error)
+          || ['unavailable', 'inconsistent', 'unmatched'].includes(outcome.status));
+        if (uncertain) setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash || attempt.transactionHash, amount);
+        await renderPayment();
+        const ambiguousWalletResult = attempt.ambiguous || isAmbiguousPaymentError(attempt.error);
+        showToast(outcome.status === 'unavailable'
+          ? ambiguousWalletResult
+            ? 'Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. ArusPay is checking the contract and payment events. No second payment was submitted.'
+            : 'The contract status could not be verified. No second payment was submitted; check status again when the RPC responds.'
+          : ambiguousWalletResult
+            ? 'Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. ArusPay is checking the contract and payment events. No second payment was submitted.'
+            : 'The result is not yet conclusive. No second payment was submitted; check wallet activity and contract status before deciding what to do.');
       }
-      window.arusPayApi?.updateInvoice(invoiceId, {
-        status: 'paid',
-        ...(outcome.payer ? { payer: outcome.payer } : {}),
-        ...(outcome.paymentTxHash ? {
-          paidAt: new Date().toISOString(),
-          paymentTxHash: outcome.paymentTxHash,
-          paymentExplorerUrl: `${EXPLORER}/tx/${outcome.paymentTxHash}`,
-        } : {}),
-        onchainVerified: true,
-      });
-      await renderPayment();
-      showToast(outcome.contractStatePending
-        ? 'A matching InvoicePaid event and successful receipt confirm payment. The RPC contract-state read is catching up; no second payment is available.'
-        : outcome.paymentTxHash
-        ? `Paid on the ArusPay contract. Verified transaction: ${outcome.paymentTxHash}`
-        : 'The ArusPay contract confirms Paid, but the RPC has not returned a verifiable transaction hash. Check status again.');
-    } else if (outcome.status === 'reverted') {
-      clearUncertainPaymentAttempt(merchant, invoiceId);
-      await renderPayment();
-      showToast('The transaction reverted and the contract still reports Open. No replacement was sent; you can decide whether to start a new payment.');
-    } else if (outcome.status === 'pending') {
-      setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash || attempt.transactionHash, amount);
-      await renderPayment();
-      showToast('A matching payment transaction is pending. No second transaction was sent; wait for its receipt or check status again.');
-    } else if (outcome.status === 'open' && !outcome.ambiguous && !attempt.ambiguous
-      && !isAmbiguousPaymentError(attempt.error)) {
-      clearUncertainPaymentAttempt(merchant, invoiceId);
-      await renderPayment();
-      const reason = attempt.error?.shortMessage || attempt.error?.message;
-      showToast(reason
-        ? `The contract still reports Open. This attempt did not confirm a payment: ${reason}`
-        : 'The contract still reports Open. No payment was confirmed.');
-    } else if (outcome.status === 'not-open') {
-      clearUncertainPaymentAttempt(merchant, invoiceId);
-      await renderPayment();
-      showToast(`The contract reports ${statusText(outcome.invoice.status, outcome.invoice.expiresAt)}. No second payment was submitted.`);
-    } else {
-      const uncertain = Boolean(attempt.transactionHash || attempt.ambiguous || isAmbiguousPaymentError(attempt.error)
-        || ['unavailable', 'inconsistent', 'unmatched'].includes(outcome.status));
-      if (uncertain) setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash || attempt.transactionHash, amount);
-      await renderPayment();
-      const ambiguousWalletResult = attempt.ambiguous || isAmbiguousPaymentError(attempt.error);
-      showToast(outcome.status === 'unavailable'
-        ? ambiguousWalletResult
-          ? 'Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. ArusPay is checking the contract and payment events. No second payment was submitted.'
-          : 'The contract status could not be verified. No second payment was submitted; check status again when the RPC responds.'
-        : ambiguousWalletResult
-          ? 'Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. ArusPay is checking the contract and payment events. No second payment was submitted.'
-          : 'The result is not yet conclusive. No second payment was submitted; check wallet activity and contract status before deciding what to do.');
-    }
-  } catch (error) {
-    const outcome = await reconcileOnchainPayment({ merchant, invoiceId, amount, payer: account, error });
-    if (outcome.status === 'paid') {
-      if (outcome.contractStatePending || (outcome.proofUnavailable && !outcome.paymentTxHash)) {
+    } catch (error) {
+      const outcome = await reconcileOnchainPayment({ merchant, invoiceId, amount, payer: account, error });
+      if (outcome.status === 'paid') {
+        if (outcome.contractStatePending || (outcome.proofUnavailable && !outcome.paymentTxHash)) {
+          setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash, amount);
+        } else {
+          clearUncertainPaymentAttempt(merchant, invoiceId);
+        }
+        window.arusPayApi?.updateInvoice(invoiceId, {
+          status: 'paid',
+          ...(outcome.payer ? { payer: outcome.payer } : {}),
+          ...(outcome.paymentTxHash ? {
+            paymentTxHash: outcome.paymentTxHash,
+            paymentExplorerUrl: `${EXPLORER}/tx/${outcome.paymentTxHash}`,
+          } : {}),
+          onchainVerified: true,
+        });
+        await renderPayment();
+        showToast(outcome.contractStatePending
+          ? 'A matching InvoicePaid event and successful receipt confirm payment. The RPC contract-state read is catching up; no second payment is available.'
+          : outcome.paymentTxHash
+          ? `The contract confirms Paid. Verified transaction: ${outcome.paymentTxHash}`
+          : 'The contract confirms Paid. Its payment receipt is not available yet; check status again for the exact hash.');
+      } else if (outcome.status === 'pending') {
         setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash, amount);
+        await renderPayment();
+        showToast('A matching transaction is pending. No additional payment was submitted.');
+      } else if (outcome.status === 'unavailable' || ['inconsistent', 'unmatched'].includes(outcome.status)
+        || outcome.ambiguous || isAmbiguousPaymentError(error)) {
+        setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash, amount);
+        await renderPayment();
+        showToast('Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. ArusPay is checking the contract and payment events. No second payment was submitted.');
+      } else if (outcome.status === 'not-open') {
+        clearUncertainPaymentAttempt(merchant, invoiceId);
+        await renderPayment();
+        showToast(`The contract reports ${statusText(outcome.invoice.status, outcome.invoice.expiresAt)}. No second payment was submitted.`);
       } else {
         clearUncertainPaymentAttempt(merchant, invoiceId);
+        await renderPayment();
+        showToast(`The contract reports ${statusText(outcome.invoice.status, outcome.invoice.expiresAt)}. No payment is confirmed: ${error?.shortMessage || error?.message || 'review the invoice state'}`);
       }
-      window.arusPayApi?.updateInvoice(invoiceId, {
-        status: 'paid',
-        ...(outcome.payer ? { payer: outcome.payer } : {}),
-        ...(outcome.paymentTxHash ? {
-          paymentTxHash: outcome.paymentTxHash,
-          paymentExplorerUrl: `${EXPLORER}/tx/${outcome.paymentTxHash}`,
-        } : {}),
-        onchainVerified: true,
-      });
-      await renderPayment();
-      showToast(outcome.contractStatePending
-        ? 'A matching InvoicePaid event and successful receipt confirm payment. The RPC contract-state read is catching up; no second payment is available.'
-        : outcome.paymentTxHash
-        ? `The contract confirms Paid. Verified transaction: ${outcome.paymentTxHash}`
-        : 'The contract confirms Paid. Its payment receipt is not available yet; check status again for the exact hash.');
-    } else if (outcome.status === 'pending') {
-      setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash, amount);
-      await renderPayment();
-      showToast('A matching transaction is pending. No additional payment was submitted.');
-    } else if (outcome.status === 'unavailable' || ['inconsistent', 'unmatched'].includes(outcome.status)
-      || outcome.ambiguous || isAmbiguousPaymentError(error)) {
-      setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash, amount);
-      await renderPayment();
-      showToast('Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. ArusPay is checking the contract and payment events. No second payment was submitted.');
-    } else if (outcome.status === 'not-open') {
-      clearUncertainPaymentAttempt(merchant, invoiceId);
-      await renderPayment();
-      showToast(`The contract reports ${statusText(outcome.invoice.status, outcome.invoice.expiresAt)}. No second payment was submitted.`);
-    } else {
-      clearUncertainPaymentAttempt(merchant, invoiceId);
-      await renderPayment();
-      showToast(`The contract reports ${statusText(outcome.invoice.status, outcome.invoice.expiresAt)}. No payment is confirmed: ${error?.shortMessage || error?.message || 'review the invoice state'}`);
+    } finally {
+      if (button?.isConnected) button.disabled = false;
     }
-  } finally {
-    paymentSubmissionInProgress = false;
-    if (button?.isConnected) button.disabled = false;
-  }
+  });
 }
 
 function openSharedInvoice(merchant, invoiceId) {
@@ -1187,7 +1188,6 @@ let activeEthereumProviderLookupState = 'not-started';
 let activeWalletChainId = null;
 let walletProviderProbeRequest = 0;
 let paymentRenderRequest = 0;
-let paymentSubmissionInProgress = false;
 let dashboardSyncRequest = 0;
 
 function setWalletBalance(value, message, error = '') {

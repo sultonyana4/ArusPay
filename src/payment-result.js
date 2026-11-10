@@ -38,6 +38,19 @@ export function isDefinitelyNoSubmissionError(error) {
     .test(errorText(error));
 }
 
+export function createPaymentSubmissionGate() {
+  let inFlight = false;
+  return async function runIfIdle(operation) {
+    if (inFlight) return { started: false };
+    inFlight = true;
+    try {
+      return { started: true, value: await operation() };
+    } finally {
+      inFlight = false;
+    }
+  };
+}
+
 export function getPaymentDisplayState({
   invoiceStatus,
   paymentStatus = null,

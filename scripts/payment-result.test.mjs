@@ -6,6 +6,7 @@ import {
   parseUnits,
 } from 'viem';
 import {
+  createPaymentSubmissionGate,
   getPaymentDisplayState,
   matchesPaymentTransaction,
   pollPaymentReconciliation,
@@ -114,9 +115,13 @@ const commonDeps = {
     findPaymentLogs: async () => (++eventReads >= 1 ? [paidLog] : []),
     findPendingTransactions: async () => [],
   };
-  const attempt = await submitPaymentOnce({
+  const runIfIdle = createPaymentSubmissionGate();
+  let releaseWalletResponse;
+  const walletResponseDelay = new Promise((resolve) => { releaseWalletResponse = resolve; });
+  const onPayClick = () => runIfIdle(() => submitPaymentOnce({
     submit: async () => {
       submitCount += 1;
+      await walletResponseDelay;
       throw new Error('already known: nonce too low: next nonce 4, tx nonce 3');
     },
     waitForReceipt: async () => { throw new Error('Must not wait without a transaction hash.'); },
@@ -126,10 +131,24 @@ const commonDeps = {
       error,
       ...delayedPaidDeps,
     }),
-  });
+  }));
+  const firstClick = onPayClick();
+  const duplicateClick = await onPayClick();
+  assert.equal(duplicateClick.started, false, 'A second rapid Pay click is ignored while the first wallet request is in flight.');
+  assert.equal(submitCount, 1, 'Two rapid click events start only one payment write.');
+  releaseWalletResponse();
+  const acceptedClick = await firstClick;
+  assert.equal(acceptedClick.started, true);
+  const attempt = acceptedClick.value;
   assert.equal(attempt.result.status, 'paid', 'A matching successful contract event proves Paid even when the first state read is stale.');
   assert.equal(attempt.result.contractStatePending, true, 'The stale contract-state read is tracked separately from the confirmed event.');
   assert.equal(attempt.result.ambiguous, true, 'already known and nonce-too-low errors remain ambiguous.');
+  assert.equal(getPaymentDisplayState({
+    invoiceStatus: 1,
+    paymentStatus: attempt.result.status,
+    hasPaymentAttempt: true,
+    expiresAt: 0n,
+  }).canPay, false, 'A matching event keeps Pay locked while the contract-state read is delayed.');
   const finalResult = await pollPaymentReconciliation({
     initialResult: attempt.result,
     reconcile: () => reconcilePaymentAttempt({ expected, error: attempt.error, ...delayedPaidDeps }),
