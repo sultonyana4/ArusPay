@@ -22,7 +22,7 @@ npm install
 npm run dev
 ```
 
-Use localhost for development checks. The canonical production domain is `https://termul.xyz`; it is attached to the existing Vercel project, but DNS pointing and domain validation are still pending. Until the custom domain is verified, the existing `https://aruspay-pi.vercel.app` host continues serving without a redirect. The interim `https://termul-pay.vercel.app` origin remains permitted during migration. Do not claim a deployment to the custom domain has occurred, and do not create hosted preview deployments.
+Use localhost for development checks. The canonical production domain is `https://termul.xyz` on the existing Vercel project. Keep `https://aruspay-pi.vercel.app` serving without a redirect until public DNS, HTTPS, Privy's production-origin configuration, and read-only invoice rendering have been verified; only then enable a redirect that preserves each path and query string. The interim `https://termul-pay.vercel.app` origin remains permitted during migration. Publish validated changes from `main` only to production; do not create hosted preview deployments.
 
 To build and serve a production bundle locally:
 
@@ -53,7 +53,7 @@ Set `VITE_PRIVY_APP_ID` in a local `.env` file to override the public Privy app 
 - `payment_attempts` stores only a Privy-user-scoped, wallet-reported submission hint for reconciling an ambiguous payment. It has no payment-status field and is cleared when the app confirms a terminal result from Arc.
 - Browser requests go through the `aruspay-api` Supabase Edge Function. It verifies the Privy ES256 access token and derives the `privy_user_id` from its verified `sub` claim. Before reading or storing invoice metadata, it also verifies a signed Privy identity token and confirms the merchant address is one of that user's linked wallets. Enable **Return user data in an identity token** in Privy under User management → Authentication → Advanced. The Supabase service-role key stays in Edge Function secrets and is never sent to the browser.
 - RLS is enabled on the metadata tables with no direct browser policies. The function returns merchant invoice metadata only to the authenticated Privy owner. The payment-attempt table is isolated by the authenticated payer's Privy identity.
-- The existing `aruspay-api` Supabase Edge Function slug is retained for compatibility. Its source CORS allowlist permits the canonical `https://termul.xyz`, interim `https://termul-pay.vercel.app`, and legacy `https://aruspay-pi.vercel.app` origins during migration; localhost and Vercel preview origins are not allowed. The function must be deployed from this source by the owner. If Supabase is unavailable, Arc reads remain authoritative and the UI reports that cloud metadata could not be loaded or saved.
+- The existing `aruspay-api` Supabase Edge Function slug is retained for compatibility. Its source CORS allowlist permits the canonical `https://termul.xyz`, interim `https://termul-pay.vercel.app`, and legacy `https://aruspay-pi.vercel.app` origins during migration; localhost and Vercel preview origins are not allowed. Deploy allowlist updates in place from reviewed source while preserving the function's identity and secrets. If Supabase is unavailable, Arc reads remain authoritative and the UI reports that cloud metadata could not be loaded or saved.
 
 ## Profile and wallet recovery
 
