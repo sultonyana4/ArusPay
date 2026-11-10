@@ -27,6 +27,11 @@ import {
   reconcilePaymentAttempt,
   submitPaymentOnce,
 } from './payment-result.js';
+import {
+  pollInvoiceCreationReconciliation,
+  reconcileInvoiceCreationAttempt,
+  submitInvoiceCreationOnce,
+} from './invoice-creation.js';
 import { metadataApi } from './metadata-api.js';
 
 const ARC_TESTNET_ID = 5042002;
@@ -42,6 +47,7 @@ const uncertainPaymentAttempts = new Map();
 const paymentReconciliationWatchers = new Map();
 const paymentReconciliationWatchComplete = new Set();
 const runPaymentSubmissionIfIdle = createPaymentSubmissionGate();
+const runInvoiceCreationIfIdle = createPaymentSubmissionGate();
 let metadataSyncUnavailable = false;
 
 const arcTestnet = defineChain({
@@ -625,19 +631,6 @@ async function estimateFee(functionName, args, account, value) {
   return { gas, fee: gas * gasPrice };
 }
 
-function eventArgs(receipt, eventName) {
-  for (const log of receipt.logs) {
-    if (log.address.toLowerCase() !== CONTRACT_ADDRESS.toLowerCase()) continue;
-    try {
-      const decoded = decodeEventLog({ abi: invoiceAbi, eventName, data: log.data, topics: log.topics });
-      return decoded.args;
-    } catch {
-      // Other events from the same transaction are ignored.
-    }
-  }
-  return null;
-}
-
 function amountFromForm() {
   let total = 0n;
   const descriptions = [];
@@ -684,75 +677,179 @@ function formInvoiceMetadata() {
 async function createOnchainInvoice() {
   const form = $('#invoice-form');
   const submit = form.querySelector('[type="submit"]');
-  if (!form.reportValidity()) return;
-  submit.disabled = true;
-  try {
-    const metadata = formInvoiceMetadata();
-    const expiresAt = expirationFromForm();
-    const invoiceId = randomInvoiceId();
-    const { account, walletClient } = await getWallet();
-    const fee = await estimateFee('createInvoice', [invoiceId, BigInt(metadata.amountBase), expiresAt], account);
-    showToast(`Review wallet confirmation. Estimated network fee: ${formatUsdc(fee.fee)} USDC; paid by your wallet.`);
-    const hash = await walletClient.writeContract({
-      account,
-      address: CONTRACT_ADDRESS,
-      abi: invoiceAbi,
-      functionName: 'createInvoice',
-      args: [invoiceId, BigInt(metadata.amountBase), expiresAt],
-    });
-    showToast('Invoice transaction submitted. Waiting for the Arc Testnet receipt…');
-    const receipt = await publicClient.waitForTransactionReceipt({ hash });
-    if (receipt.status !== 'success') throw new Error('Invoice creation reverted. No invoice was recorded in the app.');
-    const created = eventArgs(receipt, 'InvoiceCreated');
-    if (!created || created.invoiceId.toLowerCase() !== invoiceId.toLowerCase()
-      || created.merchant.toLowerCase() !== account.toLowerCase()
-      || BigInt(created.amount) !== BigInt(metadata.amountBase)) {
-      throw new Error('Receipt did not contain the expected InvoiceCreated event.');
-    }
-    const record = {
-      ...metadata,
-      id: `INV-${new Date().getFullYear()}-${invoiceId.slice(2, 10).toUpperCase()}`,
-      invoiceId,
-      merchant: account,
-      createTxHash: hash,
-      explorerUrl: `${EXPLORER}/tx/${hash}`,
-      onchainVerified: true,
+  const started = await runInvoiceCreationIfIdle(async () => {
+    if (!form.reportValidity()) return;
+    submit.disabled = true;
+    const originalSubmit = submit.innerHTML;
+    const setStatus = (message) => {
+      let status = $('#invoice-create-status');
+      if (!status) {
+        status = document.createElement('p');
+        status.id = 'invoice-create-status';
+        status.className = 'hint hidden';
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        status.style.textAlign = 'center';
+        submit.after(status);
+      }
+      status.textContent = message;
+      status.classList.toggle('hidden', !message);
     };
-    window.arusPayApi?.addInvoice(record);
-    let metadataSaved = true;
-    let metadataSaveError = '';
+    const updateStatus = (message) => {
+      submit.textContent = message ? 'Checking Arc Testnet…' : originalSubmit;
+      setStatus(message);
+    };
     try {
-      await metadataApi.saveInvoice({
+      const metadata = formInvoiceMetadata();
+      const expiresAt = expirationFromForm();
+      const invoiceId = randomInvoiceId();
+      const { account, walletClient } = await getWallet();
+      const expected = {
         chainId: ARC_TESTNET_ID,
-        contractAddress: CONTRACT_ADDRESS,
-        merchantAddress: account,
+        contract: CONTRACT_ADDRESS,
+        merchant: account,
         invoiceId,
-        amountNative: metadata.amountBase,
-        clientName: metadata.name,
-        clientEmail: metadata.email,
-        description: metadata.description,
-        expiresAt: expiresAt.toString(),
-        createTxHash: hash,
+        amount: BigInt(metadata.amountBase),
+        expiresAt,
+        abi: invoiceAbi,
+      };
+      const fee = await estimateFee('createInvoice', [invoiceId, expected.amount, expiresAt], account);
+      showToast(`Review wallet confirmation. Estimated network fee: ${formatUsdc(fee.fee)} USDC; paid by your wallet.`);
+      updateStatus('Waiting for wallet approval. ArusPay will submit this invoice only once.');
+
+      const reconcile = (attempt = {}) => reconcileInvoiceCreationAttempt({
+        expected,
+        ...attempt,
+        readChainId: () => publicClient.getChainId(),
+        readReceipt: (hash) => publicClient.getTransactionReceipt({ hash }),
+        readTransaction: (hash) => publicClient.getTransaction({ hash }),
       });
+      const attempt = await submitInvoiceCreationOnce({
+        submit: async () => {
+          if (['privy', 'privy-v2'].includes(activeWalletType)) {
+            const preparedTransaction = await publicClient.prepareTransactionRequest({
+              account,
+              chain: arcTestnet,
+              chainId: ARC_TESTNET_ID,
+              to: CONTRACT_ADDRESS,
+              data: encodeFunctionData({
+                abi: invoiceAbi,
+                functionName: 'createInvoice',
+                args: [invoiceId, expected.amount, expiresAt],
+              }),
+              value: 0n,
+            });
+            const serializedTransaction = await walletClient.signTransaction({
+              ...preparedTransaction,
+              account,
+              chain: arcTestnet,
+            });
+            return broadcastSignedTransactionOnce({
+              serializedTransaction,
+              broadcast: (serialized) => rawTransactionClient.sendRawTransaction({ serializedTransaction: serialized }),
+            });
+          }
+          return walletClient.writeContract({
+            account,
+            address: CONTRACT_ADDRESS,
+            abi: invoiceAbi,
+            functionName: 'createInvoice',
+            args: [invoiceId, expected.amount, expiresAt],
+          });
+        },
+        waitForReceipt: (hash) => publicClient.waitForTransactionReceipt({
+          hash,
+          timeout: 45000,
+          pollingInterval: 1500,
+        }),
+        reconcile,
+      });
+
+      let outcome = attempt.result;
+      if (!['created', 'reverted', 'failed', 'unmatched'].includes(outcome.status)) {
+        updateStatus('Privy returned an ambiguous result. Checking the exact signed transaction and invoice event; do not retry or approve again.');
+        showToast('The wallet response does not prove failure. ArusPay is checking this exact invoice transaction; no second transaction will be sent.');
+        outcome = await pollInvoiceCreationReconciliation({
+          initialResult: outcome,
+          reconcile: () => reconcile({
+            transactionHash: attempt.transactionHash,
+            receiptHint: attempt.receipt,
+            error: attempt.error,
+          }),
+          onUpdate: (result) => {
+            if (!['created', 'reverted', 'failed', 'unmatched'].includes(result.status)) {
+              updateStatus('Still checking the same transaction on Arc Testnet. Do not retry or approve again.');
+            }
+          },
+        });
+      }
+
+      if (outcome.status === 'created') {
+        const hash = outcome.transactionHash;
+        const record = {
+          ...metadata,
+          id: `INV-${new Date().getFullYear()}-${invoiceId.slice(2, 10).toUpperCase()}`,
+          invoiceId,
+          merchant: account,
+          createTxHash: hash,
+          explorerUrl: `${EXPLORER}/tx/${hash}`,
+          onchainVerified: true,
+        };
+        form.reset();
+        $$('.line-item').slice(1).forEach((line) => line.remove());
+        const first = $$('.line-item')[0];
+        first.querySelector('.item-qty').value = '1';
+        first.querySelector('.item-description').value = '';
+        first.querySelector('.item-price').value = '';
+        window.updatePreview?.();
+        setStatus('');
+        window.arusPayApi?.addInvoice(record);
+        let metadataSaved = true;
+        let metadataSaveError = '';
+        try {
+          await metadataApi.saveInvoice({
+            chainId: ARC_TESTNET_ID,
+            contractAddress: CONTRACT_ADDRESS,
+            merchantAddress: account,
+            invoiceId,
+            amountNative: metadata.amountBase,
+            clientName: metadata.name,
+            clientEmail: metadata.email,
+            description: metadata.description,
+            expiresAt: expiresAt.toString(),
+            createTxHash: hash,
+          });
+        } catch (error) {
+          metadataSaved = false;
+          metadataSaveError = error?.message || '';
+        }
+        showToast(metadataSaved
+          ? 'Invoice confirmed on Arc Testnet. Its payment link is ready to copy.'
+          : metadataSaveError || 'Invoice confirmed on Arc Testnet; its payment link is ready, but details could not sync to Supabase.');
+      } else if (outcome.status === 'reverted') {
+        setStatus('Arc Testnet confirmed that this transaction reverted. No invoice was created.');
+        showToast('The transaction reverted. No invoice is recorded, and ArusPay did not resend it.');
+      } else if (outcome.status === 'failed') {
+        setStatus('No invoice transaction was confirmed. You may review the form and decide what to do next.');
+        showToast(attempt.error?.shortMessage || attempt.error?.message || 'Invoice creation was not submitted.');
+      } else if (outcome.status === 'unmatched') {
+        setStatus('The transaction could not be matched to this exact invoice. No payment link was created.');
+        showToast('The receipt did not match this invoice ID, merchant, amount, and expiry. No invoice link was created.');
+      } else {
+        setStatus('The exact transaction is still unverified. This form remains locked to prevent a duplicate invoice; check again later.');
+        showToast('The outcome is still uncertain. No second transaction was sent and no invoice was marked successful.');
+      }
     } catch (error) {
-      metadataSaved = false;
-      metadataSaveError = error?.message || '';
+      setStatus('Invoice creation did not complete. No success is recorded without an exact successful receipt and InvoiceCreated event.');
+      showToast(error?.shortMessage || error?.message || 'Invoice creation failed. No success is recorded without a confirmed receipt.');
+    } finally {
+      if (submit?.isConnected) {
+        submit.disabled = false;
+        submit.innerHTML = originalSubmit;
+      }
     }
-    form.reset();
-    $$('.line-item').slice(1).forEach((line) => line.remove());
-    const first = $$('.line-item')[0];
-    first.querySelector('.item-qty').value = '1';
-    first.querySelector('.item-description').value = '';
-    first.querySelector('.item-price').value = '';
-    window.updatePreview?.();
-    showToast(metadataSaved
-      ? 'Invoice confirmed on Arc Testnet and its details synced to Supabase.'
-      : metadataSaveError || 'Invoice confirmed on Arc Testnet, but its details could not sync to Supabase.');
-  } catch (error) {
-    showToast(error?.shortMessage || error?.message || 'Invoice creation failed. No success is recorded without a confirmed receipt.');
-  } finally {
-    submit.disabled = false;
-  }
+  });
+  if (!started.started) showToast('Invoice creation is already in progress. No second transaction was sent.');
 }
 
 function statusText(status, expiresAt) {

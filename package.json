@@ -10,6 +10,7 @@
     "test:profile": "node scripts/profile-smoke.mjs",
     "test:metadata": "node scripts/metadata.test.mjs && node scripts/metadata-edge.test.mjs",
     "test:payment-result": "node scripts/payment-result.test.mjs",
+    "test:invoice-creation": "node scripts/invoice-creation.test.mjs",
     "test:wallet-diagnostics": "node scripts/privy-diagnostics.test.mjs",
     "test:testnet": "node scripts/testnet-e2e.mjs"
   },
