@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { PrivyProvider, useExportWallet, useLinkAccount, useLogin, usePrivy, useWallets } from '@privy-io/react-auth';
 import { defineChain } from 'viem';
 import { selectWalletsForOnchainSync, waitForConnectedEthereumProvider } from './privy-wallets.js';
+import { createSafeWalletDiagnostics } from './privy-diagnostics.js';
 
 const ARC_RPC = import.meta.env.VITE_ARUSPAY_BROWSER_RPC_URL || 'https://rpc.blockdaemon.testnet.arc.io';
 const arcTestnet = defineChain({
@@ -117,19 +118,29 @@ function PrivyBridge() {
           window.arusPayAuthError?.('Sign-out could not be completed. Please try again.');
         }
       },
-      getEthereumProvider: async ({ address, walletClientType } = {}) => waitForConnectedEthereumProvider({
+      getEthereumProvider: async ({ address, walletClientType, onProviderState } = {}) => waitForConnectedEthereumProvider({
         getWallets: () => walletsRef.current,
         isReady: () => walletsReadyRef.current,
         address,
         walletClientType,
         fallbackProvider: window.ethereum,
+        onProviderState,
+      }),
+      getRuntimeDiagnostics: ({ selectedWalletClientType, providerLookupState, chainId } = {}) => createSafeWalletDiagnostics({
+        sessionReady: ready,
+        authenticated,
+        walletsReady: walletsAreReady,
+        wallets: walletsRef.current,
+        selectedWalletClientType,
+        providerLookupState,
+        chainId,
       }),
     };
 
     return () => {
       delete window.arusPayPrivy;
     };
-  }, [authenticated, exportWallet, linkTwitter, login, logout, wallets, walletsAreReady]);
+  }, [authenticated, exportWallet, linkTwitter, login, logout, ready, wallets, walletsAreReady]);
 
   useEffect(() => {
     if (!ready) return;

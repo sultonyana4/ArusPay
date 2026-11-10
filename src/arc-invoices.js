@@ -10,6 +10,13 @@ import {
   parseUnits,
 } from 'viem';
 import { isExpectedHexChainId, withTimeout } from './privy-wallets.js';
+import './wallet-diagnostics.css';
+import {
+  createSafeWalletDiagnostics,
+  formatSafeWalletDiagnostics,
+  isEvmConnectedWallet,
+  walletDiagnosticsNextStep,
+} from './privy-diagnostics.js';
 
 const ARC_TESTNET_ID = 5042002;
 const ARC_ENV = import.meta.env || {};
@@ -534,21 +541,22 @@ async function renderPayment() {
         : activeWalletProviderState === 'checking'
           ? `Checking the ${isPrivyWallet ? 'Privy ' : ''}wallet provider and verifying Arc Testnet (chain ID ${ARC_TESTNET_ID}) using a read-only request. No signature or transaction has been requested.`
           : !providerVerified
-            ? activeWalletProviderError || 'The wallet provider and Arc Testnet network have not been verified. Tap Retry to repeat the read-only check. No signature or transaction has been requested.'
+            ? activeWalletProviderError || 'The wallet provider and Arc Testnet network have not been verified. Review the safe connection diagnostics below; no signature or transaction was requested.'
             : isPrivyWallet
               ? 'The Privy provider answered a read-only Arc Testnet network check. Signing has not been tested here; no signature or transaction has been requested.'
               : `Wallet provider for ${shortAddress(activeWalletAddress)} answered a read-only Arc Testnet network check. No signature or transaction has been requested.`;
       paymentButton.before(walletHint);
       if (activeWalletAddress && !providerVerified) {
         paymentButton.disabled = true;
-        if (activeWalletProviderState !== 'checking') {
-          const retryButton = document.createElement('button');
-          retryButton.className = 'btn btn-quiet btn-sm';
-          retryButton.id = 'retry-wallet-connection';
-          retryButton.type = 'button';
-          retryButton.textContent = isPrivyWallet ? 'Retry Privy connection' : 'Retry wallet connection';
-          retryButton.addEventListener('click', () => void checkActiveWalletProvider(activeWalletAddress, activeWalletType));
-          paymentButton.after(retryButton);
+        if (activeWalletProviderState === 'unavailable') {
+          const diagnosticArgs = {
+            selectedWalletClientType: activeWalletType,
+            providerLookupState: activeEthereumProviderLookupState,
+            chainId: activeWalletChainId,
+          };
+          const diagnostics = window.arusPayPrivy?.getRuntimeDiagnostics?.(diagnosticArgs)
+            || createSafeWalletDiagnostics(diagnosticArgs);
+          paymentButton.after(createWalletDiagnosticsPanel(diagnostics));
         }
       }
     }
@@ -652,6 +660,8 @@ let activeWalletType = '';
 let activeWalletProviderReady = false;
 let activeWalletProviderState = 'disconnected';
 let activeWalletProviderError = '';
+let activeEthereumProviderLookupState = 'not-started';
+let activeWalletChainId = null;
 let walletProviderProbeRequest = 0;
 let paymentRenderRequest = 0;
 let dashboardSyncRequest = 0;
@@ -682,6 +692,65 @@ function setInvoiceSyncStatus(message, error = '') {
   status.title = error;
 }
 
+function createWalletDiagnosticsPanel(diagnostics) {
+  const panel = document.createElement('section');
+  panel.className = 'wallet-diagnostics';
+  panel.setAttribute('aria-label', 'Safe wallet connection diagnostics');
+
+  const heading = document.createElement('strong');
+  heading.textContent = 'Safe connection diagnostics';
+  panel.append(heading);
+
+  const rows = [
+    ['Privy session', !diagnostics.privySessionReady
+      ? 'Initializing'
+      : diagnostics.privyAuthenticated ? 'Ready · authenticated' : 'Ready · not authenticated'],
+    ['useWallets.ready', String(diagnostics.useWalletsReady)],
+    ['Connected EVM wallets', `${diagnostics.connectedEvmWalletCount}${diagnostics.connectedEvmWalletTypes.length
+      ? ` · ${diagnostics.connectedEvmWalletTypes.join(', ')}`
+      : ''}`],
+    ['Selected wallet/provider type', diagnostics.selectedWalletProviderType],
+    ['getEthereumProvider', diagnostics.getEthereumProvider],
+    ['eth_chainId', diagnostics.ethChainId],
+  ];
+  const list = document.createElement('dl');
+  for (const [label, value] of rows) {
+    const row = document.createElement('div');
+    const term = document.createElement('dt');
+    const detail = document.createElement('dd');
+    term.textContent = label;
+    detail.textContent = value;
+    row.append(term, detail);
+    list.append(row);
+  }
+  panel.append(list);
+
+  const safeText = formatSafeWalletDiagnostics(diagnostics);
+  const text = document.createElement('pre');
+  text.className = 'wallet-diagnostics-text';
+  text.textContent = safeText;
+  panel.append(text);
+
+  const nextStep = document.createElement('p');
+  nextStep.textContent = walletDiagnosticsNextStep(diagnostics);
+  panel.append(nextStep);
+
+  const copy = document.createElement('button');
+  copy.className = 'btn btn-quiet btn-sm';
+  copy.type = 'button';
+  copy.textContent = 'Copy safe diagnostics';
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(safeText);
+      showToast('Safe wallet diagnostics copied. No wallet address or account details are included.');
+    } catch {
+      showToast('Clipboard access was blocked. Select the safe diagnostics shown above and copy them manually.');
+    }
+  });
+  panel.append(copy);
+  return panel;
+}
+
 async function checkActiveWalletProvider(address = activeWalletAddress, walletClientType = activeWalletType) {
   if (!address) return false;
   const request = ++walletProviderProbeRequest;
@@ -689,19 +758,38 @@ async function checkActiveWalletProvider(address = activeWalletAddress, walletCl
   const expectedAddress = address.toLowerCase();
   activeWalletProviderReady = false;
   activeWalletProviderState = 'checking';
+  activeEthereumProviderLookupState = 'pending';
+  activeWalletChainId = null;
   activeWalletProviderError = '';
   if (!$('#payment').classList.contains('hidden') && window.arusPayApi?.getSelectedInvoice()) {
     void renderPayment();
   }
   try {
+    const getEthereumProvider = window.arusPayPrivy?.getEthereumProvider;
+    if (typeof getEthereumProvider !== 'function') {
+      activeEthereumProviderLookupState = 'rejected';
+      throw new Error('Privy wallet bridge is unavailable.');
+    }
     const providerLookupRemaining = deadline - Date.now();
     if (providerLookupRemaining <= 0) throw new Error('Privy provider lookup timed out.');
     const provider = await withTimeout(
-      () => window.arusPayPrivy?.getEthereumProvider?.({ address, walletClientType }),
+      () => getEthereumProvider.call(window.arusPayPrivy, {
+        address,
+        walletClientType,
+        onProviderState: (state) => {
+          if (request === walletProviderProbeRequest && activeWalletAddress?.toLowerCase() === expectedAddress) {
+            activeEthereumProviderLookupState = state;
+          }
+        },
+      }),
       providerLookupRemaining,
       'Privy provider lookup timed out.',
     );
-    if (!provider?.request) throw new Error('No connected wallet provider was returned.');
+    if (!provider?.request) {
+      if (activeEthereumProviderLookupState === 'pending') activeEthereumProviderLookupState = 'timeout';
+      throw new Error('No connected wallet provider was returned.');
+    }
+    activeEthereumProviderLookupState = 'resolved';
     const chainCheckRemaining = deadline - Date.now();
     if (chainCheckRemaining <= 0) throw new Error('Privy read-only connection check timed out.');
     const chainId = await withTimeout(
@@ -712,6 +800,7 @@ async function checkActiveWalletProvider(address = activeWalletAddress, walletCl
     if (typeof chainId !== 'string' || !/^0x[0-9a-f]+$/i.test(chainId)) {
       throw new Error('The wallet provider did not return a valid chain ID.');
     }
+    activeWalletChainId = chainId.toLowerCase();
     if (!isExpectedHexChainId(chainId, ARC_TESTNET_ID)) {
       throw new Error('The connected wallet is not on Arc Testnet.');
     }
@@ -722,17 +811,32 @@ async function checkActiveWalletProvider(address = activeWalletAddress, walletCl
     if (request !== walletProviderProbeRequest || activeWalletAddress?.toLowerCase() !== expectedAddress) return false;
     activeWalletProviderReady = false;
     activeWalletProviderState = 'unavailable';
-    const retryAction = ['privy', 'privy-v2'].includes(walletClientType) ? 'Retry Privy connection' : 'Retry wallet connection';
+    if (error?.message === 'Privy provider lookup timed out.'
+      || error?.message === 'No connected wallet provider was returned.') {
+      if (activeEthereumProviderLookupState === 'pending') activeEthereumProviderLookupState = 'timeout';
+    } else if (error?.message === 'Privy wallet bridge is unavailable.') {
+      activeEthereumProviderLookupState = 'rejected';
+    }
+    const diagnosticArgs = {
+      selectedWalletClientType: walletClientType,
+      providerLookupState: activeEthereumProviderLookupState,
+      chainId: activeWalletChainId,
+    };
+    const diagnostics = window.arusPayPrivy?.getRuntimeDiagnostics?.(diagnosticArgs)
+      || createSafeWalletDiagnostics(diagnosticArgs);
+    const nextStep = walletDiagnosticsNextStep(diagnostics);
     if (error?.message === 'Privy provider lookup timed out.') {
-      activeWalletProviderError = `The ${['privy', 'privy-v2'].includes(walletClientType) ? 'Privy ' : ''}wallet provider was not returned within 12 seconds. Tap ${retryAction} to repeat this read-only check. No signature or transaction was requested.`;
+      activeWalletProviderError = `Privy did not return a wallet provider within 12 seconds. ${nextStep} No signature or transaction was requested.`;
     } else if (error?.message === 'Privy read-only connection check timed out.') {
-      activeWalletProviderError = `The wallet provider did not answer the Arc Testnet network check within 12 seconds. Tap ${retryAction} to repeat it. No signature or transaction was requested.`;
+      activeWalletProviderError = `The wallet provider did not answer the read-only eth_chainId check within 12 seconds. ${nextStep} No signature or transaction was requested.`;
     } else if (error?.message === 'The connected wallet is not on Arc Testnet.') {
-      activeWalletProviderError = `The connected wallet is not on Arc Testnet (chain ID ${ARC_TESTNET_ID}). Switch to Arc Testnet, then tap ${retryAction}. No signature or transaction was requested.`;
+      activeWalletProviderError = `The selected wallet is not on Arc Testnet. ${nextStep} No signature or transaction was requested.`;
     } else if (error?.message === 'The wallet provider did not return a valid chain ID.') {
-      activeWalletProviderError = `The wallet provider returned an invalid network ID. Reconnect it, then tap ${retryAction}. No signature or transaction was requested.`;
+      activeWalletProviderError = `The wallet provider returned an invalid eth_chainId value. ${nextStep} No signature or transaction was requested.`;
+    } else if (activeEthereumProviderLookupState === 'rejected') {
+      activeWalletProviderError = `Privy rejected or could not start getEthereumProvider(). ${nextStep} No signature or transaction was requested.`;
     } else {
-      activeWalletProviderError = `The connected wallet provider could not be verified on Arc Testnet. Tap ${retryAction} to repeat the read-only check. No signature or transaction was requested.`;
+      activeWalletProviderError = `The read-only wallet provider check did not pass. ${nextStep} No signature or transaction was requested.`;
     }
   }
   if (!$('#payment').classList.contains('hidden') && window.arusPayApi?.getSelectedInvoice()) {
@@ -791,7 +895,7 @@ window.arusPayRefreshSync = () => refreshArcDashboard();
 });
 
 window.arusPayWalletChanged = (wallets = []) => {
-  const wallet = wallets.find((item) => item.chainType === 'ethereum' || item.chainType === 'evm');
+  const wallet = wallets.find(isEvmConnectedWallet);
   if (wallet?.address) {
     try {
       const nextAddress = getAddress(wallet.address);
@@ -813,6 +917,8 @@ window.arusPayWalletChanged = (wallets = []) => {
       activeWalletProviderReady = false;
       activeWalletProviderState = 'disconnected';
       activeWalletProviderError = '';
+      activeEthereumProviderLookupState = 'not-started';
+      activeWalletChainId = null;
       dashboardSyncRequest += 1;
       setWalletBalance('—', 'Privy returned an invalid wallet address.');
       setInvoiceSyncStatus('Invoice sync unavailable · check the connected wallet.');
@@ -833,6 +939,8 @@ window.arusPayWalletChanged = (wallets = []) => {
   activeWalletProviderReady = false;
   activeWalletProviderState = 'disconnected';
   activeWalletProviderError = '';
+  activeEthereumProviderLookupState = 'not-started';
+  activeWalletChainId = null;
   dashboardSyncRequest += 1;
   window.arusPayApi?.setInvoiceSyncState('disconnected');
   ['#refresh-chain-sync', '#profile-refresh-chain-sync'].forEach((selector) => {

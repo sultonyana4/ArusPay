@@ -1,6 +1,6 @@
-const EVM_CHAIN_TYPES = new Set(['ethereum', 'evm']);
+import { isEvmConnectedWallet } from './privy-diagnostics.js';
+
 const PRIVY_WALLET_CLIENT_TYPES = new Set(['privy', 'privy-v2']);
-const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
 export function isPrivyWalletClientType(walletClientType) {
   return PRIVY_WALLET_CLIENT_TYPES.has(walletClientType);
@@ -24,12 +24,7 @@ export function withTimeout(operation, timeoutMs, message = 'The operation timed
 }
 
 function isEvmWallet(wallet) {
-  return Boolean(
-    wallet &&
-    typeof wallet.address === 'string' &&
-    EVM_ADDRESS.test(wallet.address) &&
-    EVM_CHAIN_TYPES.has(wallet.chainType),
-  );
+  return isEvmConnectedWallet(wallet);
 }
 
 export function selectWalletsForOnchainSync(activeWallets, user) {
@@ -61,14 +56,25 @@ export async function waitForConnectedEthereumProvider({
   address,
   walletClientType,
   fallbackProvider,
+  onProviderState,
   timeoutMs = 12_000,
   retryIntervalMs = 200,
 }) {
   const expectedAddress = typeof address === 'string' ? address.toLowerCase() : '';
   const embeddedWallet = isPrivyWalletClientType(walletClientType);
   const deadline = Date.now() + timeoutMs;
+  let lastProviderState = 'timeout';
+  const reportProviderState = (state) => {
+    lastProviderState = state;
+    try {
+      onProviderState?.(state);
+    } catch {
+      // Diagnostic callbacks are optional and must not affect the provider lookup.
+    }
+  };
 
   if (!embeddedWallet && !expectedAddress && fallbackProvider && typeof fallbackProvider.request === 'function') {
+    reportProviderState('resolved');
     return fallbackProvider;
   }
 
@@ -84,6 +90,7 @@ export async function waitForConnectedEthereumProvider({
       ));
 
       if (wallet) {
+        reportProviderState('pending');
         try {
           const remainingMs = deadline - Date.now();
           if (remainingMs <= 0) break;
@@ -92,13 +99,19 @@ export async function waitForConnectedEthereumProvider({
             remainingMs,
             'Privy provider lookup timed out.',
           );
-          if (provider && typeof provider.request === 'function') return provider;
-        } catch {
+          if (provider && typeof provider.request === 'function') {
+            reportProviderState('resolved');
+            return provider;
+          }
+          reportProviderState('rejected');
+        } catch (error) {
+          reportProviderState(error?.message === 'Privy provider lookup timed out.' ? 'timeout' : 'rejected');
           // Privy's secure wallet connection can still be initializing; retry until the deadline.
         }
       }
 
       if (!embeddedWallet && fallbackProvider && typeof fallbackProvider.request === 'function') {
+        reportProviderState('resolved');
         return fallbackProvider;
       }
     }
@@ -107,7 +120,9 @@ export async function waitForConnectedEthereumProvider({
   }
 
   if (!embeddedWallet && fallbackProvider && typeof fallbackProvider.request === 'function') {
+    reportProviderState('resolved');
     return fallbackProvider;
   }
+  if (lastProviderState !== 'rejected') reportProviderState('timeout');
   return null;
 }

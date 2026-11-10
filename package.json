@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
     "test:profile": "node scripts/profile-smoke.mjs",
+    "test:wallet-diagnostics": "node scripts/privy-diagnostics.test.mjs",
     "test:testnet": "node scripts/testnet-e2e.mjs"
   },
   "dependencies": {
