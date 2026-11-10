@@ -17,6 +17,7 @@ import {
   isEvmConnectedWallet,
   walletDiagnosticsNextStep,
 } from './privy-diagnostics.js';
+import { isAmbiguousPaymentError, reconcilePaymentAttempt, submitPaymentOnce } from './payment-result.js';
 
 const ARC_TESTNET_ID = 5042002;
 const ARC_ENV = import.meta.env || {};
@@ -27,6 +28,8 @@ const CONTRACT_START_BLOCK = BigInt(ARC_ENV.VITE_ARUSPAY_DEPLOYMENT_BLOCK || '71
 const LOG_BLOCK_RANGE = 9999n;
 const EXPLORER = 'https://explorer.testnet.arc.io';
 const STATUS = { none: 0, open: 1, paid: 2, cancelled: 3 };
+const PAYMENT_ATTEMPT_STORAGE = 'aruspay:uncertain-payment:v1:';
+const uncertainPaymentAttempts = new Map();
 
 const arcTestnet = defineChain({
   id: ARC_TESTNET_ID,
@@ -250,6 +253,91 @@ async function getOnchainInvoice(merchant, invoiceId) {
     args: [getAddress(merchant), invoiceId],
   });
   return readInvoiceResult(result);
+}
+
+function paymentAttemptKey(merchant, invoiceId) {
+  return `${PAYMENT_ATTEMPT_STORAGE}${merchant.toLowerCase()}:${String(invoiceId).toLowerCase()}`;
+}
+function getUncertainPaymentAttempt(merchant, invoiceId) {
+  const key = paymentAttemptKey(merchant, invoiceId);
+  let attempt = uncertainPaymentAttempts.get(key) || null;
+  try {
+    const saved = window.localStorage.getItem(key);
+    if (saved) attempt = JSON.parse(saved);
+  } catch {
+    // The in-memory marker remains available when browser storage is blocked.
+  }
+  return attempt && attempt.merchant?.toLowerCase() === merchant.toLowerCase()
+    && attempt.invoiceId?.toLowerCase() === invoiceId.toLowerCase() ? attempt : null;
+}
+
+function setUncertainPaymentAttempt(merchant, invoiceId, payer, transactionHash = null) {
+  const key = paymentAttemptKey(merchant, invoiceId);
+  const attempt = {
+    merchant: getAddress(merchant),
+    invoiceId,
+    payer: payer ? getAddress(payer) : null,
+    transactionHash,
+    updatedAt: Date.now(),
+  };
+  uncertainPaymentAttempts.set(key, attempt);
+  try { window.localStorage.setItem(key, JSON.stringify(attempt)); } catch { /* Keep the session marker. */ }
+  return attempt;
+}
+
+function clearUncertainPaymentAttempt(merchant, invoiceId) {
+  const key = paymentAttemptKey(merchant, invoiceId);
+  uncertainPaymentAttempts.delete(key);
+  try { window.localStorage.removeItem(key); } catch { /* In-memory state is still cleared. */ }
+}
+
+async function getInvoicePaymentLogs(merchant, invoiceId) {
+  const event = invoiceAbi.find((item) => item.type === 'event' && item.name === 'InvoicePaid');
+  const latestBlock = await publicClient.getBlockNumber();
+  const logs = [];
+  for (let fromBlock = CONTRACT_START_BLOCK; fromBlock <= latestBlock;) {
+    const toBlock = fromBlock + LOG_BLOCK_RANGE - 1n < latestBlock
+      ? fromBlock + LOG_BLOCK_RANGE - 1n
+      : latestBlock;
+    const page = await publicClient.getLogs({
+      address: CONTRACT_ADDRESS,
+      event,
+      args: { merchant: getAddress(merchant), invoiceId },
+      fromBlock,
+      toBlock,
+    });
+    logs.push(...page);
+    fromBlock = toBlock + 1n;
+  }
+  return logs;
+}
+
+async function reconcileOnchainPayment({ merchant, invoiceId, amount, payer, transactionHash = null, receiptHint = null, error = null }) {
+  const expectedAmount = BigInt(amount);
+  return reconcilePaymentAttempt({
+    expected: {
+      chainId: ARC_TESTNET_ID,
+      contract: CONTRACT_ADDRESS,
+      merchant: getAddress(merchant),
+      invoiceId,
+      payer: payer ? getAddress(payer) : null,
+      amount: expectedAmount,
+      abi: invoiceAbi,
+      status: STATUS,
+    },
+    transactionHash,
+    receiptHint,
+    error,
+    readChainId: () => publicClient.getChainId(),
+    readInvoice: () => getOnchainInvoice(merchant, invoiceId),
+    readReceipt: (hash) => publicClient.getTransactionReceipt({ hash }),
+    readTransaction: (hash) => publicClient.getTransaction({ hash }),
+    findPaymentLogs: () => getInvoicePaymentLogs(merchant, invoiceId),
+    findPendingTransactions: async () => {
+      const pendingBlock = await publicClient.getBlock({ blockTag: 'pending', includeTransactions: true });
+      return pendingBlock.transactions.filter((transaction) => typeof transaction === 'object');
+    },
+  });
 }
 
 async function getMerchantEventLogs(eventName, merchant, latestBlock) {
@@ -497,7 +585,8 @@ function statusText(status, expiresAt) {
 
 function renderPaymentUnavailable(message, merchant = '', invoiceId = '') {
   const view = $('#payment-view');
-  view.innerHTML = `<div class="panel payment-empty"><div class="payment-unavailable" role="status"><div class="availability-icon" aria-hidden="true">!</div><span class="eyebrow">Arc Testnet invoice</span><h1>Invoice unavailable</h1><p>${escapeHtml(message)}</p>${merchant && invoiceId ? `<div class="availability-details"><span><b>Merchant</b> ${escapeHtml(merchant)}</span><span><b>Invoice ID</b> <span class="mono">${escapeHtml(shortId(invoiceId))}</span></span></div>` : ''}<button class="btn btn-quiet" id="payment-back">Back to invoices</button></div></div>`;
+  view.innerHTML = `<div class="panel payment-empty"><div class="payment-unavailable" role="status"><div class="availability-icon" aria-hidden="true">!</div><span class="eyebrow">Arc Testnet invoice</span><h1>Invoice unavailable</h1><p>${escapeHtml(message)}</p><p>The app will not submit a payment while contract status is unavailable. Check status again when the Arc RPC responds.</p>${merchant && invoiceId ? `<div class="availability-details"><span><b>Merchant</b> ${escapeHtml(merchant)}</span><span><b>Invoice ID</b> <span class="mono">${escapeHtml(shortId(invoiceId))}</span></span></div>` : ''}<button class="btn btn-quiet" id="retry-payment-status" type="button">Check payment status</button> <button class="btn btn-quiet" id="payment-back">Back to invoices</button></div></div>`;
+  $('#retry-payment-status')?.addEventListener('click', () => void renderPayment());
   $('#payment-back')?.addEventListener('click', () => window.arusPayApi?.navigate('dashboard'));
 }
 
@@ -511,18 +600,129 @@ async function renderPayment() {
   }
   view.innerHTML = '<div class="panel payment-empty"><div class="empty-state"><strong>Reading Arc Testnet</strong><span>Checking invoice state directly from the contract…</span></div></div>';
   try {
-    const invoice = await getOnchainInvoice(selected.merchant, selected.invoiceId);
+    let invoice = await getOnchainInvoice(selected.merchant, selected.invoiceId);
     if (requestId !== paymentRenderRequest) return;
+    let paymentAttempt = getUncertainPaymentAttempt(selected.merchant, selected.invoiceId);
+    let paymentReconciliation = null;
+    if (invoice.status === STATUS.paid || paymentAttempt) {
+      paymentReconciliation = await reconcileOnchainPayment({
+        merchant: selected.merchant,
+        invoiceId: selected.invoiceId,
+        amount: invoice.amount,
+        payer: paymentAttempt?.payer || activeWalletAddress,
+        transactionHash: paymentAttempt?.transactionHash || null,
+        error: paymentAttempt ? new Error('A previous wallet submission has an ambiguous result.') : null,
+      });
+      if (requestId !== paymentRenderRequest) return;
+      if (paymentReconciliation.invoice) invoice = paymentReconciliation.invoice;
+      if (paymentReconciliation.status === 'paid' || paymentReconciliation.status === 'reverted'
+        || paymentReconciliation.status === 'not-open') {
+        clearUncertainPaymentAttempt(selected.merchant, selected.invoiceId);
+        paymentAttempt = null;
+      }
+      if (paymentReconciliation.status === 'paid') {
+        window.arusPayApi?.updateInvoice(selected.invoiceId, {
+          status: 'paid',
+          ...(paymentReconciliation.payer ? { payer: paymentReconciliation.payer } : {}),
+          ...(paymentReconciliation.paymentTxHash ? {
+            paymentTxHash: paymentReconciliation.paymentTxHash,
+            paymentExplorerUrl: `${EXPLORER}/tx/${paymentReconciliation.paymentTxHash}`,
+          } : {}),
+          onchainVerified: true,
+        });
+      }
+    }
     const status = statusText(invoice.status, invoice.expiresAt);
     if (invoice.status === STATUS.none) throw new Error('This invoice ID does not exist for the specified merchant.');
     const amount = formatUsdc(invoice.amount);
     const known = window.arusPayApi?.getInvoices().find((item) => item.invoiceId?.toLowerCase() === selected.invoiceId.toLowerCase());
     const due = invoice.expiresAt === 0n ? 'No expiry' : new Date(Number(invoice.expiresAt) * 1000).toLocaleString('en-US');
     const link = makeInvoiceLink(invoice.merchant, selected.invoiceId);
-    const canPay = invoice.status === STATUS.open && status === 'Open';
+    const canPay = invoice.status === STATUS.open && status === 'Open' && !paymentAttempt;
     const stateClass = invoice.status === STATUS.paid ? 'paid' : invoice.status === STATUS.cancelled || status === 'Expired' ? 'overdue' : 'pending';
     view.innerHTML = `<div class="pay-crumb"><button class="table-link" id="payment-invoices">Invoices</button> <span style="color:#596578">/</span> <span class="mono">${escapeHtml(shortId(selected.invoiceId))}</span></div><div class="pay-layout"><section class="pay-main-card"><div class="pay-business"><div class="business-logo">AP</div><div><strong>ArusPay invoice</strong><span class="mono">${escapeHtml(shortId(selected.invoiceId))}</span></div></div><div class="pay-content"><span class="eyebrow">Arc Testnet · On-chain status</span><h1>${escapeHtml(status)}</h1><p>${known ? `Invoice for ${escapeHtml(known.name)}` : 'Invoice details read from Arc Testnet.'}</p><div class="pay-due"><div class="pay-due-label">${invoice.status === STATUS.paid ? 'Amount paid' : 'Amount due'}</div><div class="pay-due-amount">${escapeHtml(amount)} <span>USDC</span></div></div><div class="pay-network"><span class="chain-name"><i class="chain-icon">A</i> Arc Testnet</span><span class="status ${stateClass}">${escapeHtml(status)}</span></div><div class="availability-details"><span><b>Merchant</b> <span class="mono">${escapeHtml(invoice.merchant)}</span></span><span><b>Due / expiry</b> ${escapeHtml(due)}</span><span><b>Invoice ID</b> <span class="mono">${escapeHtml(selected.invoiceId)}</span></span></div><div class="fee-note"><span>ⓘ</span><span>Estimated fees are paid by your wallet in USDC. No gas sponsorship is used.</span></div>${canPay ? '<button class="btn btn-primary btn-full" id="pay-onchain" type="button">Pay invoice on Arc Testnet</button>' : ''}<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn btn-quiet btn-sm" id="copy-invoice-link" type="button">Copy payment link</button><a class="btn btn-quiet btn-sm" href="${EXPLORER}/address/${CONTRACT_ADDRESS}" target="_blank" rel="noreferrer">View contract</a></div>${known?.createTxHash ? `<p class="hint">Creation receipt: <a class="table-link" href="${EXPLORER}/tx/${known.createTxHash}" target="_blank" rel="noreferrer">${escapeHtml(shortAddress(known.createTxHash))}</a></p>` : ''}${known?.paymentTxHash ? `<p class="hint">Payment receipt: <a class="table-link" href="${EXPLORER}/tx/${known.paymentTxHash}" target="_blank" rel="noreferrer">${escapeHtml(shortAddress(known.paymentTxHash))}</a></p>` : ''}<p class="hint">Client name, email, descriptions, and notes are not written to the contract.</p></div></section><aside class="pay-summary"><h2>Invoice summary</h2><div class="summary-row"><span>Invoice number</span><strong>${escapeHtml(known?.id || shortId(selected.invoiceId))}</strong></div><div class="summary-row"><span>Client</span><strong>${escapeHtml(known?.name || 'Invoice recipient')}</strong></div><div class="summary-row"><span>Description</span><strong>${escapeHtml(known?.description || 'On-chain invoice')}</strong></div><div class="summary-row"><span>Due date</span><strong>${escapeHtml(due)}</strong></div><div class="summary-row summary-total"><span>Total</span><strong>${escapeHtml(amount)} USDC</strong></div><div class="payment-foot">State is read from the Arc Testnet contract.</div></aside></div>`;
+    if (known?.paymentTxHash && !paymentReconciliation?.paymentTxHash) {
+      const staleReceipt = [...view.querySelectorAll('a')]
+        .find((anchor) => anchor.href === `${EXPLORER}/tx/${known.paymentTxHash}`);
+      staleReceipt?.closest('p')?.remove();
+    }
     const paymentButton = $('#pay-onchain');
+    const resultPanel = document.createElement('div');
+    resultPanel.className = 'payment-result-status';
+    resultPanel.setAttribute('role', 'status');
+    resultPanel.style.marginTop = '12px';
+    if (paymentReconciliation?.status === 'paid') {
+      const paidMessage = document.createElement('p');
+      paidMessage.className = 'hint';
+      paidMessage.textContent = paymentReconciliation.paymentTxHash
+        ? `Paid on the ArusPay contract. Verified payer: ${paymentReconciliation.payer}. Transaction hash: `
+        : 'Paid on the ArusPay contract. The payment receipt and exact transaction hash are not available from the RPC yet; check status again.';
+      resultPanel.append(paidMessage);
+      if (paymentReconciliation.paymentTxHash) {
+        const receiptLink = document.createElement('a');
+        receiptLink.href = `${EXPLORER}/tx/${paymentReconciliation.paymentTxHash}`;
+        receiptLink.target = '_blank';
+        receiptLink.rel = 'noreferrer';
+        receiptLink.className = 'mono';
+        receiptLink.style.overflowWrap = 'anywhere';
+        receiptLink.textContent = paymentReconciliation.paymentTxHash;
+        resultPanel.append(receiptLink);
+      } else {
+        const checkButton = document.createElement('button');
+        checkButton.type = 'button';
+        checkButton.className = 'btn btn-quiet btn-sm';
+        checkButton.textContent = 'Check payment status';
+        checkButton.addEventListener('click', () => void renderPayment());
+        resultPanel.append(checkButton);
+      }
+    } else if (paymentAttempt) {
+      const stateMessage = document.createElement('p');
+      stateMessage.className = 'hint';
+      stateMessage.textContent = paymentReconciliation?.status === 'pending'
+        ? 'The contract still reports Open, and a matching transaction is pending. No second payment was submitted. Wait for its receipt or check status again.'
+        : paymentReconciliation?.status === 'unavailable'
+          ? 'The last payment request has an uncertain result, and the contract could not be re-read. No new payment is available until a read-only status check succeeds.'
+          : 'The contract still reports Open, but the previous wallet response was ambiguous. No second payment was submitted. Check wallet activity and re-read status before deciding what to do.';
+      resultPanel.append(stateMessage);
+      if (paymentReconciliation?.status === 'pending' && paymentReconciliation.paymentTxHash) {
+        const pendingLink = document.createElement('a');
+        pendingLink.href = `${EXPLORER}/tx/${paymentReconciliation.paymentTxHash}`;
+        pendingLink.target = '_blank';
+        pendingLink.rel = 'noreferrer';
+        pendingLink.className = 'mono';
+        pendingLink.style.overflowWrap = 'anywhere';
+        pendingLink.textContent = paymentReconciliation.paymentTxHash;
+        resultPanel.append(pendingLink);
+      } else if (paymentAttempt.transactionHash) {
+        const unverifiedHash = document.createElement('p');
+        unverifiedHash.className = 'hint mono';
+        unverifiedHash.style.overflowWrap = 'anywhere';
+        unverifiedHash.textContent = `Wallet-reported transaction hash (not yet verified): ${paymentAttempt.transactionHash}`;
+        resultPanel.append(unverifiedHash);
+      }
+      const checkButton = document.createElement('button');
+      checkButton.type = 'button';
+      checkButton.className = 'btn btn-quiet btn-sm';
+      checkButton.textContent = 'Check payment status';
+      checkButton.style.marginLeft = '8px';
+      checkButton.addEventListener('click', () => void renderPayment());
+      resultPanel.append(checkButton);
+      if (paymentReconciliation?.status === 'open') {
+        const clearButton = document.createElement('button');
+        clearButton.type = 'button';
+        clearButton.className = 'btn btn-quiet btn-sm';
+        clearButton.textContent = 'I checked wallet activity; no payment is pending';
+        clearButton.style.marginLeft = '8px';
+        clearButton.addEventListener('click', () => {
+          clearUncertainPaymentAttempt(selected.merchant, selected.invoiceId);
+          showToast('No payment was submitted automatically. The contract still reports Open; you may now decide whether to start a new payment.');
+          void renderPayment();
+        });
+        resultPanel.append(clearButton);
+      }
+    }
+    const resultAnchor = paymentButton || $('.fee-note');
+    if (resultPanel.childNodes.length) resultAnchor?.after(resultPanel);
     if (paymentButton) {
       const isPrivyWallet = ['privy', 'privy-v2'].includes(activeWalletType);
       const providerVerified = activeWalletProviderState === 'connected' && activeWalletProviderReady;
@@ -589,48 +789,121 @@ async function renderPayment() {
 
 async function payInvoice(merchant, invoiceId, amount) {
   const button = $('#pay-onchain');
+  if (paymentSubmissionInProgress) return;
+  if (getUncertainPaymentAttempt(merchant, invoiceId)) {
+    showToast('A previous payment result is still uncertain. Check status and wallet activity; no second transaction was submitted.');
+    await renderPayment();
+    return;
+  }
+  paymentSubmissionInProgress = true;
   if (button) button.disabled = true;
+  let account = activeWalletAddress;
   try {
-    const { account, walletClient } = await getWallet();
+    const wallet = await getWallet();
+    account = wallet.account;
     const current = await getOnchainInvoice(merchant, invoiceId);
     if (current.status !== STATUS.open) throw new Error(`This invoice is ${statusText(current.status, current.expiresAt).toLowerCase()} and cannot be paid.`);
     if (current.expiresAt !== 0n && current.expiresAt <= BigInt(Math.floor(Date.now() / 1000))) throw new Error('This invoice has expired.');
-    const fee = await estimateFee('payInvoice', [getAddress(merchant), invoiceId], account, amount);
+    if (current.amount !== BigInt(amount)) throw new Error('The displayed amount no longer matches the on-chain invoice. Review the updated invoice before paying.');
+    const fee = await estimateFee('payInvoice', [getAddress(merchant), invoiceId], account, current.amount);
     showToast(`Review wallet confirmation for ${formatUsdc(amount)} USDC plus an estimated ${formatUsdc(fee.fee)} USDC network fee.`);
-    const hash = await walletClient.writeContract({
-      account,
-      address: CONTRACT_ADDRESS,
-      abi: invoiceAbi,
-      functionName: 'payInvoice',
-      args: [getAddress(merchant), invoiceId],
-      value: amount,
+    const attempt = await submitPaymentOnce({
+      submit: () => wallet.walletClient.writeContract({
+        account,
+        address: CONTRACT_ADDRESS,
+        abi: invoiceAbi,
+        functionName: 'payInvoice',
+        args: [getAddress(merchant), invoiceId],
+        value: current.amount,
+      }),
+      waitForReceipt: (hash) => publicClient.waitForTransactionReceipt({ hash, timeout: 45000, pollingInterval: 1500 }),
+      reconcile: ({ transactionHash, receiptHint, error }) => reconcileOnchainPayment({
+        merchant,
+        invoiceId,
+        amount: current.amount,
+        payer: account,
+        transactionHash,
+        receiptHint,
+        error,
+      }),
     });
-    showToast('Payment submitted. Waiting for the Arc Testnet receipt…');
-    const receipt = await publicClient.waitForTransactionReceipt({ hash });
-    if (receipt.status !== 'success') throw new Error('Payment reverted. The invoice remains unpaid.');
-    const paid = eventArgs(receipt, 'InvoicePaid');
-    if (!paid || paid.invoiceId.toLowerCase() !== invoiceId.toLowerCase()
-      || paid.merchant.toLowerCase() !== merchant.toLowerCase()
-      || paid.payer.toLowerCase() !== account.toLowerCase()
-      || BigInt(paid.amount) !== current.amount) {
-      throw new Error('Receipt did not contain the expected InvoicePaid event.');
+    const outcome = attempt.result;
+    if (outcome.status === 'paid') {
+      clearUncertainPaymentAttempt(merchant, invoiceId);
+      window.arusPayApi?.updateInvoice(invoiceId, {
+        status: 'paid',
+        ...(outcome.payer ? { payer: outcome.payer } : {}),
+        ...(outcome.paymentTxHash ? {
+          paidAt: new Date().toISOString(),
+          paymentTxHash: outcome.paymentTxHash,
+          paymentExplorerUrl: `${EXPLORER}/tx/${outcome.paymentTxHash}`,
+        } : {}),
+        onchainVerified: true,
+      });
+      await renderPayment();
+      showToast(outcome.paymentTxHash
+        ? `Paid on the ArusPay contract. Verified transaction: ${outcome.paymentTxHash}`
+        : 'The ArusPay contract confirms Paid, but the RPC has not returned a verifiable transaction hash. Check status again.');
+    } else if (outcome.status === 'reverted') {
+      clearUncertainPaymentAttempt(merchant, invoiceId);
+      await renderPayment();
+      showToast('The transaction reverted and the contract still reports Open. No replacement was sent; you can decide whether to start a new payment.');
+    } else if (outcome.status === 'pending') {
+      setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash || attempt.transactionHash);
+      await renderPayment();
+      showToast('A matching payment transaction is pending. No second transaction was sent; wait for its receipt or check status again.');
+    } else if (outcome.status === 'open' && !outcome.ambiguous && !attempt.ambiguous
+      && !isAmbiguousPaymentError(attempt.error)) {
+      clearUncertainPaymentAttempt(merchant, invoiceId);
+      await renderPayment();
+      const reason = attempt.error?.shortMessage || attempt.error?.message;
+      showToast(reason
+        ? `The contract still reports Open. This attempt did not confirm a payment: ${reason}`
+        : 'The contract still reports Open. No payment was confirmed.');
+    } else if (outcome.status === 'not-open') {
+      clearUncertainPaymentAttempt(merchant, invoiceId);
+      await renderPayment();
+      showToast(`The contract reports ${statusText(outcome.invoice.status, outcome.invoice.expiresAt)}. No second payment was submitted.`);
+    } else {
+      const uncertain = Boolean(attempt.transactionHash || attempt.ambiguous || isAmbiguousPaymentError(attempt.error)
+        || ['unavailable', 'inconsistent', 'unmatched'].includes(outcome.status));
+      if (uncertain) setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash || attempt.transactionHash);
+      await renderPayment();
+      showToast(outcome.status === 'unavailable'
+        ? 'The contract status could not be verified. No second payment was submitted; check status again when the RPC responds.'
+        : 'The result is not yet conclusive. No second payment was submitted; check wallet activity and contract status before deciding what to do.');
     }
-    const after = await getOnchainInvoice(merchant, invoiceId);
-    if (after.status !== STATUS.paid) throw new Error('Payment event was found, but the contract state is not Paid.');
-    window.arusPayApi?.updateInvoice(invoiceId, {
-      status: 'paid',
-      paidAt: new Date().toISOString(),
-      payer: account,
-      paymentTxHash: hash,
-      paymentExplorerUrl: `${EXPLORER}/tx/${hash}`,
-      onchainVerified: true,
-    });
-    await renderPayment();
-    showToast('Payment confirmed on Arc Testnet.');
   } catch (error) {
-    showToast(error?.shortMessage || error?.message || 'Payment failed. No paid state is shown without a matching receipt and event.');
-    await renderPayment();
+    const outcome = await reconcileOnchainPayment({ merchant, invoiceId, amount, payer: account, error });
+    if (outcome.status === 'paid') {
+      clearUncertainPaymentAttempt(merchant, invoiceId);
+      window.arusPayApi?.updateInvoice(invoiceId, {
+        status: 'paid',
+        ...(outcome.payer ? { payer: outcome.payer } : {}),
+        ...(outcome.paymentTxHash ? {
+          paymentTxHash: outcome.paymentTxHash,
+          paymentExplorerUrl: `${EXPLORER}/tx/${outcome.paymentTxHash}`,
+        } : {}),
+        onchainVerified: true,
+      });
+      await renderPayment();
+      showToast(outcome.paymentTxHash
+        ? `The contract confirms Paid. Verified transaction: ${outcome.paymentTxHash}`
+        : 'The contract confirms Paid. Its payment receipt is not available yet; check status again for the exact hash.');
+    } else if (outcome.status === 'unavailable') {
+      if (isAmbiguousPaymentError(error)) setUncertainPaymentAttempt(merchant, invoiceId, account);
+      renderPaymentUnavailable('The payment result cannot be checked until the Arc Testnet contract read succeeds.', merchant, invoiceId);
+    } else if (outcome.status === 'pending') {
+      setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash);
+      await renderPayment();
+      showToast('A matching transaction is pending. No additional payment was submitted.');
+    } else {
+      clearUncertainPaymentAttempt(merchant, invoiceId);
+      await renderPayment();
+      showToast(`The contract reports ${statusText(outcome.invoice.status, outcome.invoice.expiresAt)}. No payment is confirmed: ${error?.shortMessage || error?.message || 'review the invoice state'}`);
+    }
   } finally {
+    paymentSubmissionInProgress = false;
     if (button?.isConnected) button.disabled = false;
   }
 }
@@ -664,6 +937,7 @@ let activeEthereumProviderLookupState = 'not-started';
 let activeWalletChainId = null;
 let walletProviderProbeRequest = 0;
 let paymentRenderRequest = 0;
+let paymentSubmissionInProgress = false;
 let dashboardSyncRequest = 0;
 
 function setWalletBalance(value, message, error = '') {
