@@ -6,6 +6,7 @@ import {
   parseUnits,
 } from 'viem';
 import {
+  getPaymentDisplayState,
   matchesPaymentTransaction,
   pollPaymentReconciliation,
   reconcilePaymentAttempt,
@@ -126,7 +127,8 @@ const commonDeps = {
       ...delayedPaidDeps,
     }),
   });
-  assert.equal(attempt.result.status, 'open', 'A stale first contract read is not misreported as Paid.');
+  assert.equal(attempt.result.status, 'paid', 'A matching successful contract event proves Paid even when the first state read is stale.');
+  assert.equal(attempt.result.contractStatePending, true, 'The stale contract-state read is tracked separately from the confirmed event.');
   assert.equal(attempt.result.ambiguous, true, 'already known and nonce-too-low errors remain ambiguous.');
   const finalResult = await pollPaymentReconciliation({
     initialResult: attempt.result,
@@ -136,8 +138,76 @@ const commonDeps = {
     sleep: async () => {},
   });
   assert.equal(finalResult.status, 'paid', 'Bounded read-only polling catches the delayed on-chain Paid transition.');
+  assert.equal(finalResult.contractStatePending, undefined, 'Polling continues until the contract state itself catches up.');
   assert.equal(finalResult.paymentTxHash, hash, 'The eventual confirmed event supplies the exact transaction hash.');
   assert.equal(submitCount, 1, 'Polling never resubmits the payment.');
+}
+
+{
+  let submitCount = 0;
+  let invoiceReads = 0;
+  let receiptReads = 0;
+  const mockWallet = {
+    writeContract: async () => {
+      submitCount += 1;
+      throw Object.assign(new Error('already known: nonce too low: next nonce 5, tx nonce 4'), {
+        cause: new Error('Missing or invalid parameters.'),
+      });
+    },
+  };
+  const delayedRpcDeps = {
+    readChainId: async () => chainId,
+    readInvoice: async () => onchainInvoice(++invoiceReads >= 5 ? 2 : 1),
+    readReceipt: async () => {
+      receiptReads += 1;
+      if (receiptReads <= 2) throw new Error('Transaction receipt not available yet.');
+      return successfulReceipt;
+    },
+    readTransaction: async () => transaction,
+    findPaymentLogs: async () => [paidLog],
+    findPendingTransactions: async () => [],
+  };
+  const attempt = await submitPaymentOnce({
+    submit: () => mockWallet.writeContract({ functionName: 'payInvoice' }),
+    waitForReceipt: async () => { throw new Error('No wallet hash was returned, so receipt waiting must not run.'); },
+    reconcile: ({ transactionHash, receiptHint, error }) => reconcilePaymentAttempt({
+      expected,
+      transactionHash,
+      receiptHint,
+      error,
+      ...delayedRpcDeps,
+    }),
+  });
+  assert.equal(attempt.result.status, 'open', 'A known wallet error remains uncertain while the receipt is unavailable.');
+  assert.equal(attempt.ambiguous, true, 'The nested Privy parameter error does not erase the ambiguous already-known result.');
+  const finalResult = await pollPaymentReconciliation({
+    initialResult: attempt.result,
+    reconcile: () => reconcilePaymentAttempt({ expected, error: attempt.error, ...delayedRpcDeps }),
+    intervalMs: 0,
+    maxAttempts: 8,
+    sleep: async () => {},
+  });
+  assert.equal(finalResult.status, 'paid', 'The matching event and delayed successful receipt confirm payment without a refresh.');
+  assert.equal(finalResult.paymentTxHash, hash, 'The exact hash is recovered from the verified contract event.');
+  assert.equal(finalResult.contractStatePending, undefined, 'The poll waits until the contract-state RPC also reports Paid.');
+  assert.equal(invoiceReads, 5, 'Contract-state propagation is retried read-only.');
+  assert.equal(receiptReads, 5, 'Receipt propagation is retried read-only.');
+  assert.equal(submitCount, 1, 'The mock wallet is never resubmitted while reconciliation runs.');
+}
+
+{
+  const paidFromEvent = getPaymentDisplayState({
+    invoiceStatus: 1,
+    paymentStatus: 'paid',
+    hasPaymentAttempt: true,
+    expiresAt: 0n,
+  });
+  assert.equal(paidFromEvent.label, 'Paid', 'A verified payment result overrides a stale Open RPC read in the visible invoice.');
+  assert.equal(paidFromEvent.canPay, false, 'The Pay button is omitted once payment is confirmed.');
+  const paidFromContract = getPaymentDisplayState({ invoiceStatus: 2, hasPaymentAttempt: false, expiresAt: 0n });
+  assert.equal(paidFromContract.canPay, false, 'A Paid contract state never offers Pay.');
+  const open = getPaymentDisplayState({ invoiceStatus: 1, hasPaymentAttempt: false, expiresAt: 0n });
+  assert.equal(open.canPay, true, 'An Open invoice without an uncertain payment still offers Pay.');
 }
 
 {

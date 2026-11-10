@@ -25,7 +25,7 @@ Arc has a native USDC interface with 18 decimals for `msg.value` and gas, and an
 
 The connected wallet pays its own Arc Testnet gas fees in USDC. No relayer or gas sponsor is used. Since payment is a payable native-value call, the payer does not need a separate ERC-20 approval transaction.
 
-The UI checks the connected wallet is on Arc Testnet before offering a transaction, displays the amount, intended merchant, and estimated network fee before wallet confirmation, and validates a successful receipt plus the expected event and contract state before showing an invoice as paid. A wallet prompt or local invoice record alone is not treated as proof of payment.
+The UI checks the connected wallet is on Arc Testnet before offering a transaction, displays the amount, intended merchant, and estimated network fee before wallet confirmation, and accepts either the current `Paid` contract state or a successful receipt containing the exact `InvoicePaid` event and matching `payInvoice` transaction as payment proof. If an RPC state read still reports `Open` after event/receipt proof, the UI shows `Paid`, disables further payment, explains the RPC delay, and continues read-only checks until state catches up. Errors such as `already known` and `nonce too low` are treated as ambiguous; a wallet prompt or local invoice record alone is not proof, and the app never resubmits automatically.
 
 ## Test
 

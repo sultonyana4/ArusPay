@@ -18,6 +18,7 @@ import {
   walletDiagnosticsNextStep,
 } from './privy-diagnostics.js';
 import {
+  getPaymentDisplayState,
   isAmbiguousPaymentError,
   pollPaymentReconciliation,
   reconcilePaymentAttempt,
@@ -330,11 +331,10 @@ function clearLocalPaymentAttemptCache() {
 async function getInvoicePaymentLogs(merchant, invoiceId) {
   const event = invoiceAbi.find((item) => item.type === 'event' && item.name === 'InvoicePaid');
   const latestBlock = await publicClient.getBlockNumber();
-  const logs = [];
-  for (let fromBlock = CONTRACT_START_BLOCK; fromBlock <= latestBlock;) {
-    const toBlock = fromBlock + LOG_BLOCK_RANGE - 1n < latestBlock
-      ? fromBlock + LOG_BLOCK_RANGE - 1n
-      : latestBlock;
+  for (let toBlock = latestBlock; toBlock >= CONTRACT_START_BLOCK;) {
+    const fromBlock = toBlock - LOG_BLOCK_RANGE + 1n > CONTRACT_START_BLOCK
+      ? toBlock - LOG_BLOCK_RANGE + 1n
+      : CONTRACT_START_BLOCK;
     const page = await publicClient.getLogs({
       address: CONTRACT_ADDRESS,
       event,
@@ -342,10 +342,11 @@ async function getInvoicePaymentLogs(merchant, invoiceId) {
       fromBlock,
       toBlock,
     });
-    logs.push(...page);
-    fromBlock = toBlock + 1n;
+    if (page.length) return page;
+    if (fromBlock === CONTRACT_START_BLOCK) break;
+    toBlock = fromBlock - 1n;
   }
-  return logs;
+  return [];
 }
 
 async function reconcileOnchainPayment({ merchant, invoiceId, amount, payer, transactionHash = null, receiptHint = null, error = null }) {
@@ -388,8 +389,8 @@ function startPaymentReconciliationWatch({ merchant, invoiceId, amount = null, p
   }
   const watch = pollPaymentReconciliation({
     initialResult,
-    intervalMs: 2000,
-    maxAttempts: 30,
+    intervalMs: (attempt) => attempt < 5 ? 2000 : Math.min(30000, 2000 * (2 ** Math.floor((attempt - 5) / 4))),
+    maxAttempts: Number.POSITIVE_INFINITY,
     shouldContinue: () => window.arusPayCurrentPrivyUserId === watchUserId
       && Boolean(getUncertainPaymentAttempt(merchant, invoiceId)),
     reconcile: async () => {
@@ -416,8 +417,14 @@ function startPaymentReconciliationWatch({ merchant, invoiceId, amount = null, p
       }
       if (outcome.status === 'paid') {
         const hashUnavailable = outcome.proofUnavailable && !outcome.paymentTxHash;
-        if (hashUnavailable) {
-          setUncertainPaymentAttempt(merchant, invoiceId, attempt.payer || payer, null, expectedAmount);
+        if (hashUnavailable || outcome.contractStatePending) {
+          setUncertainPaymentAttempt(
+            merchant,
+            invoiceId,
+            attempt.payer || payer,
+            outcome.paymentTxHash || attempt.transactionHash,
+            expectedAmount,
+          );
         } else {
           clearUncertainPaymentAttempt(merchant, invoiceId);
         }
@@ -432,7 +439,9 @@ function startPaymentReconciliationWatch({ merchant, invoiceId, amount = null, p
           onchainVerified: true,
         });
         await renderPayment();
-        if (outcome.paymentTxHash) {
+        if (outcome.contractStatePending) {
+          showToast('A matching InvoicePaid event and successful receipt confirm payment. The RPC contract-state read is catching up; no second payment is available.');
+        } else if (outcome.paymentTxHash) {
           showToast(`Paid on the ArusPay contract. Verified transaction: ${outcome.paymentTxHash}`);
         } else if (!paidWithoutHashToastShown) {
           paidWithoutHashToastShown = true;
@@ -791,13 +800,16 @@ async function renderPayment() {
       if (requestId !== paymentRenderRequest) return;
       if (paymentReconciliation.invoice) invoice = paymentReconciliation.invoice;
       if ((paymentReconciliation.status === 'paid'
+          && !paymentReconciliation.contractStatePending
           && !(paymentReconciliation.proofUnavailable && !paymentReconciliation.paymentTxHash))
         || paymentReconciliation.status === 'reverted' || paymentReconciliation.status === 'not-open') {
         clearUncertainPaymentAttempt(selected.merchant, selected.invoiceId);
         paymentAttempt = null;
       }
       if (paymentReconciliation.status === 'paid') {
-        if (paymentReconciliation.proofUnavailable && !paymentReconciliation.paymentTxHash && !paymentAttempt) {
+        if ((paymentReconciliation.contractStatePending
+            || (paymentReconciliation.proofUnavailable && !paymentReconciliation.paymentTxHash))
+          && !paymentAttempt) {
           paymentAttempt = setUncertainPaymentAttempt(
             selected.merchant,
             selected.invoiceId,
@@ -817,19 +829,31 @@ async function renderPayment() {
         });
       }
     }
-    const status = statusText(invoice.status, invoice.expiresAt);
+    const known = window.arusPayApi?.getInvoices().find((item) => item.invoiceId?.toLowerCase() === selected.invoiceId.toLowerCase());
+    const paymentDisplay = getPaymentDisplayState({
+      invoiceStatus: invoice.status,
+      paymentStatus: paymentReconciliation?.status,
+      knownPaid: known?.status === 'paid' && known?.onchainVerified,
+      expiresAt: invoice.expiresAt,
+      hasPaymentAttempt: Boolean(paymentAttempt),
+      statusCodes: STATUS,
+    });
+    const status = paymentDisplay.label;
     if (invoice.status === STATUS.none) throw new Error('This invoice ID does not exist for the specified merchant.');
     const amount = formatUsdc(invoice.amount);
-    const known = window.arusPayApi?.getInvoices().find((item) => item.invoiceId?.toLowerCase() === selected.invoiceId.toLowerCase());
     const due = invoice.expiresAt === 0n ? 'No expiry' : new Date(Number(invoice.expiresAt) * 1000).toLocaleString('en-US');
     const link = makeInvoiceLink(invoice.merchant, selected.invoiceId);
-    const canPay = invoice.status === STATUS.open && status === 'Open' && !paymentAttempt;
-    const stateClass = invoice.status === STATUS.paid ? 'paid' : invoice.status === STATUS.cancelled || status === 'Expired' ? 'overdue' : 'pending';
+    const canPay = paymentDisplay.canPay;
+    const stateClass = paymentDisplay.paid ? 'paid' : invoice.status === STATUS.cancelled || status === 'Expired' ? 'overdue' : 'pending';
     view.innerHTML = `<div class="pay-crumb"><button class="table-link" id="payment-invoices">Invoices</button> <span style="color:#596578">/</span> <span class="mono">${escapeHtml(shortId(selected.invoiceId))}</span></div><div class="pay-layout"><section class="pay-main-card"><div class="pay-business"><div class="business-logo">AP</div><div><strong>ArusPay invoice</strong><span class="mono">${escapeHtml(shortId(selected.invoiceId))}</span></div></div><div class="pay-content"><span class="eyebrow">Arc Testnet · On-chain status</span><h1>${escapeHtml(status)}</h1><p>${known ? `Invoice for ${escapeHtml(known.name)}` : 'Invoice details read from Arc Testnet.'}</p><div class="pay-due"><div class="pay-due-label">${invoice.status === STATUS.paid ? 'Amount paid' : 'Amount due'}</div><div class="pay-due-amount">${escapeHtml(amount)} <span>USDC</span></div></div><div class="pay-network"><span class="chain-name"><i class="chain-icon">A</i> Arc Testnet</span><span class="status ${stateClass}">${escapeHtml(status)}</span></div><div class="availability-details"><span><b>Merchant</b> <span class="mono">${escapeHtml(invoice.merchant)}</span></span><span><b>Due / expiry</b> ${escapeHtml(due)}</span><span><b>Invoice ID</b> <span class="mono">${escapeHtml(selected.invoiceId)}</span></span></div><div class="fee-note"><span>ⓘ</span><span>Estimated fees are paid by your wallet in USDC. No gas sponsorship is used.</span></div>${canPay ? '<button class="btn btn-primary btn-full" id="pay-onchain" type="button">Pay invoice on Arc Testnet</button>' : ''}<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn btn-quiet btn-sm" id="copy-invoice-link" type="button">Copy payment link</button><a class="btn btn-quiet btn-sm" href="${EXPLORER}/address/${CONTRACT_ADDRESS}" target="_blank" rel="noreferrer">View contract</a></div>${known?.createTxHash ? `<p class="hint">Creation receipt: <a class="table-link" href="${EXPLORER}/tx/${known.createTxHash}" target="_blank" rel="noreferrer">${escapeHtml(shortAddress(known.createTxHash))}</a></p>` : ''}${known?.paymentTxHash ? `<p class="hint">Payment receipt: <a class="table-link" href="${EXPLORER}/tx/${known.paymentTxHash}" target="_blank" rel="noreferrer">${escapeHtml(shortAddress(known.paymentTxHash))}</a></p>` : ''}<p class="hint">Client name, email, descriptions, and notes are not written to the contract.</p></div></section><aside class="pay-summary"><h2>Invoice summary</h2><div class="summary-row"><span>Invoice number</span><strong>${escapeHtml(known?.id || shortId(selected.invoiceId))}</strong></div><div class="summary-row"><span>Client</span><strong>${escapeHtml(known?.name || 'Invoice recipient')}</strong></div><div class="summary-row"><span>Description</span><strong>${escapeHtml(known?.description || 'On-chain invoice')}</strong></div><div class="summary-row"><span>Due date</span><strong>${escapeHtml(due)}</strong></div><div class="summary-row summary-total"><span>Total</span><strong>${escapeHtml(amount)} USDC</strong></div><div class="payment-foot">State is read from the Arc Testnet contract.</div></aside></div>`;
     if (known?.paymentTxHash && !paymentReconciliation?.paymentTxHash) {
       const staleReceipt = [...view.querySelectorAll('a')]
         .find((anchor) => anchor.href === `${EXPLORER}/tx/${known.paymentTxHash}`);
       staleReceipt?.closest('p')?.remove();
+    }
+    if (paymentDisplay.paid) {
+      const amountLabel = view.querySelector('.pay-due-label');
+      if (amountLabel) amountLabel.textContent = 'Amount paid';
     }
     const paymentButton = $('#pay-onchain');
     const resultPanel = document.createElement('div');
@@ -839,7 +863,9 @@ async function renderPayment() {
     if (paymentReconciliation?.status === 'paid') {
       const paidMessage = document.createElement('p');
       paidMessage.className = 'hint';
-      paidMessage.textContent = paymentReconciliation.paymentTxHash
+      paidMessage.textContent = paymentReconciliation.contractStatePending
+        ? 'A matching InvoicePaid event and successful receipt confirm Paid. The RPC contract-state read is catching up; ArusPay keeps payment locked and will verify again automatically.'
+        : paymentReconciliation.paymentTxHash
         ? `Paid on the ArusPay contract. Verified payer: ${paymentReconciliation.payer}. Transaction hash: `
         : 'Paid on the ArusPay contract. The payment receipt and exact transaction hash are not available from the RPC yet; check status again.';
       resultPanel.append(paidMessage);
@@ -873,8 +899,8 @@ async function renderPayment() {
             ? 'The last payment request has an uncertain result. ArusPay is retrying read-only contract checks; no second payment is being submitted.'
             : 'The last payment request has an uncertain result, and the contract could not be re-read. No second payment is available; check the contract status again when the RPC responds.'
           : paymentReconciliationWatchers.has(paymentAttemptKey(selected.merchant, selected.invoiceId))
-            ? 'The wallet response was ambiguous. ArusPay is checking Arc Testnet automatically; no second payment is being submitted.'
-            : 'The wallet response was ambiguous and the invoice is still Open. No second payment is available while the result remains uncertain; check status again.';
+            ? 'Privy’s wallet error or nonce message is ambiguous and does not prove payment failed. ArusPay is checking the contract and matching payment events automatically; no second payment is being submitted.'
+            : 'Privy’s wallet error or nonce message is ambiguous and does not prove payment failed. The invoice still reads Open, so no second payment is available while the result remains uncertain; check status again.';
       resultPanel.append(stateMessage);
       if (paymentReconciliation?.status === 'pending' && paymentReconciliation.paymentTxHash) {
         const pendingLink = document.createElement('a');
@@ -1030,7 +1056,11 @@ async function payInvoice(merchant, invoiceId, amount) {
     });
     const outcome = attempt.result;
     if (outcome.status === 'paid') {
-      clearUncertainPaymentAttempt(merchant, invoiceId);
+      if (outcome.contractStatePending || (outcome.proofUnavailable && !outcome.paymentTxHash)) {
+        setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash || attempt.transactionHash, amount);
+      } else {
+        clearUncertainPaymentAttempt(merchant, invoiceId);
+      }
       window.arusPayApi?.updateInvoice(invoiceId, {
         status: 'paid',
         ...(outcome.payer ? { payer: outcome.payer } : {}),
@@ -1042,7 +1072,9 @@ async function payInvoice(merchant, invoiceId, amount) {
         onchainVerified: true,
       });
       await renderPayment();
-      showToast(outcome.paymentTxHash
+      showToast(outcome.contractStatePending
+        ? 'A matching InvoicePaid event and successful receipt confirm payment. The RPC contract-state read is catching up; no second payment is available.'
+        : outcome.paymentTxHash
         ? `Paid on the ArusPay contract. Verified transaction: ${outcome.paymentTxHash}`
         : 'The ArusPay contract confirms Paid, but the RPC has not returned a verifiable transaction hash. Check status again.');
     } else if (outcome.status === 'reverted') {
@@ -1070,14 +1102,23 @@ async function payInvoice(merchant, invoiceId, amount) {
         || ['unavailable', 'inconsistent', 'unmatched'].includes(outcome.status));
       if (uncertain) setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash || attempt.transactionHash, amount);
       await renderPayment();
+      const ambiguousWalletResult = attempt.ambiguous || isAmbiguousPaymentError(attempt.error);
       showToast(outcome.status === 'unavailable'
-        ? 'The contract status could not be verified. No second payment was submitted; check status again when the RPC responds.'
-        : 'The result is not yet conclusive. No second payment was submitted; check wallet activity and contract status before deciding what to do.');
+        ? ambiguousWalletResult
+          ? 'Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. ArusPay is checking the contract and payment events. No second payment was submitted.'
+          : 'The contract status could not be verified. No second payment was submitted; check status again when the RPC responds.'
+        : ambiguousWalletResult
+          ? 'Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. ArusPay is checking the contract and payment events. No second payment was submitted.'
+          : 'The result is not yet conclusive. No second payment was submitted; check wallet activity and contract status before deciding what to do.');
     }
   } catch (error) {
     const outcome = await reconcileOnchainPayment({ merchant, invoiceId, amount, payer: account, error });
     if (outcome.status === 'paid') {
-      clearUncertainPaymentAttempt(merchant, invoiceId);
+      if (outcome.contractStatePending || (outcome.proofUnavailable && !outcome.paymentTxHash)) {
+        setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash, amount);
+      } else {
+        clearUncertainPaymentAttempt(merchant, invoiceId);
+      }
       window.arusPayApi?.updateInvoice(invoiceId, {
         status: 'paid',
         ...(outcome.payer ? { payer: outcome.payer } : {}),
@@ -1088,7 +1129,9 @@ async function payInvoice(merchant, invoiceId, amount) {
         onchainVerified: true,
       });
       await renderPayment();
-      showToast(outcome.paymentTxHash
+      showToast(outcome.contractStatePending
+        ? 'A matching InvoicePaid event and successful receipt confirm payment. The RPC contract-state read is catching up; no second payment is available.'
+        : outcome.paymentTxHash
         ? `The contract confirms Paid. Verified transaction: ${outcome.paymentTxHash}`
         : 'The contract confirms Paid. Its payment receipt is not available yet; check status again for the exact hash.');
     } else if (outcome.status === 'pending') {
@@ -1099,7 +1142,7 @@ async function payInvoice(merchant, invoiceId, amount) {
       || outcome.ambiguous || isAmbiguousPaymentError(error)) {
       setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash, amount);
       await renderPayment();
-      showToast('The wallet response was ambiguous. ArusPay is checking the Arc contract; no second payment was submitted.');
+      showToast('Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. ArusPay is checking the contract and payment events. No second payment was submitted.');
     } else if (outcome.status === 'not-open') {
       clearUncertainPaymentAttempt(merchant, invoiceId);
       await renderPayment();

@@ -38,6 +38,31 @@ export function isDefinitelyNoSubmissionError(error) {
     .test(errorText(error));
 }
 
+export function getPaymentDisplayState({
+  invoiceStatus,
+  paymentStatus = null,
+  knownPaid = false,
+  expiresAt = 0n,
+  nowSeconds = Math.floor(Date.now() / 1000),
+  hasPaymentAttempt = false,
+  statusCodes = { open: 1, paid: 2, cancelled: 3 },
+}) {
+  const paid = Number(invoiceStatus) === Number(statusCodes.paid) || paymentStatus === 'paid' || knownPaid;
+  const expired = BigInt(expiresAt) !== 0n && BigInt(expiresAt) <= BigInt(nowSeconds);
+  const label = paid
+    ? 'Paid'
+    : Number(invoiceStatus) === Number(statusCodes.cancelled)
+      ? 'Cancelled'
+      : expired ? 'Expired' : 'Open';
+  return {
+    label,
+    paid,
+    canPay: label === 'Open'
+      && Number(invoiceStatus) === Number(statusCodes.open)
+      && !hasPaymentAttempt,
+  };
+}
+
 export function matchesPaymentTransaction(transaction, expected, payer = expected.payer) {
   if (!transaction || !expected?.abi) return false;
   try {
@@ -128,11 +153,11 @@ async function proveEventPayment(log, expected, deps, receiptHint = null) {
   };
 }
 
-async function findConfirmedPayment(expected, deps) {
+async function findConfirmedPayment(expected, deps, receiptHint = null) {
   let logs;
   try { logs = await deps.findPaymentLogs(); } catch { return null; }
   for (const log of logs || []) {
-    const proof = await proveEventPayment(log, expected, deps);
+    const proof = await proveEventPayment(log, expected, deps, receiptHint);
     if (proof) return proof;
   }
   return null;
@@ -170,7 +195,7 @@ export async function reconcilePaymentAttempt({
   const ambiguous = isAmbiguousPaymentError(error);
 
   if (Number(invoice.status) === paidStatus) {
-    const proof = await findConfirmedPayment(expected, deps);
+    const proof = await findConfirmedPayment(expected, deps, receiptHint);
     return proof
       ? { ...proof, invoice, ambiguous }
       : { status: 'paid', invoice, paymentTxHash: null, payer: null, payerMatchesExpected: false, proofUnavailable: true, ambiguous };
@@ -178,6 +203,11 @@ export async function reconcilePaymentAttempt({
 
   if (Number(invoice.status) !== openStatus) {
     return { status: 'not-open', invoice, paymentTxHash: null, payer: null, proofUnavailable: false, ambiguous };
+  }
+
+  if (transactionHash || receiptHint || ambiguous) {
+    const proof = await findConfirmedPayment(expected, deps, receiptHint);
+    if (proof) return { ...proof, invoice, ambiguous, contractStatePending: true };
   }
 
   let receipt = receiptHint;
@@ -204,7 +234,17 @@ export async function reconcilePaymentAttempt({
       if (Number(refreshed.status) === paidStatus) {
         return { status: 'paid', invoice: refreshed, paymentTxHash: transactionHash, payer: getAddress(expected.payer), payerMatchesExpected: true, receiptStatus: 'success', proofUnavailable: false, ambiguous };
       }
-      return { status: 'inconsistent', invoice: refreshed, paymentTxHash: transactionHash, payer: getAddress(expected.payer), proofUnavailable: false, ambiguous: true };
+      return {
+        status: 'paid',
+        invoice: refreshed,
+        paymentTxHash: transactionHash,
+        payer: getAddress(expected.payer),
+        payerMatchesExpected: true,
+        receiptStatus: 'success',
+        proofUnavailable: false,
+        ambiguous: true,
+        contractStatePending: true,
+      };
     }
     if (validTransaction && receipt.status === 'success') {
       return { status: 'unmatched', invoice, paymentTxHash: transactionHash, payer: getAddress(expected.payer), proofUnavailable: false, ambiguous: true };
@@ -276,6 +316,7 @@ export async function pollPaymentReconciliation({
 }) {
   let result = initialResult;
   const isSettled = (value) => (value?.status === 'paid'
+    && !value.contractStatePending
     && (!value.proofUnavailable || Boolean(value.paymentTxHash)))
     || value?.status === 'reverted'
     || value?.status === 'not-open'
@@ -283,7 +324,8 @@ export async function pollPaymentReconciliation({
 
   for (let attempt = 0; attempt < maxAttempts && !isSettled(result); attempt += 1) {
     if (!shouldContinue()) break;
-    await sleep(intervalMs);
+    const delay = typeof intervalMs === 'function' ? intervalMs(attempt, result) : intervalMs;
+    await sleep(delay);
     if (!shouldContinue()) break;
     try {
       result = await reconcile();
