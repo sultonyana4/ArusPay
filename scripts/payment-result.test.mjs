@@ -7,6 +7,7 @@ import {
 } from 'viem';
 import {
   matchesPaymentTransaction,
+  pollPaymentReconciliation,
   reconcilePaymentAttempt,
   submitPaymentOnce,
 } from '../src/payment-result.js';
@@ -98,6 +99,97 @@ const commonDeps = {
   assert.equal(result.result.status, 'paid', 'A mined payment is found through its contract event after nonce/already-known errors.');
   assert.equal(result.result.paymentTxHash, hash, 'The mined payment hash comes from the matching event and receipt.');
   assert.equal(submitCount, 1, 'An ambiguous nonce/already-known error never causes an automatic resubmission.');
+}
+
+{
+  let submitCount = 0;
+  let invoiceReads = 0;
+  let eventReads = 0;
+  const delayedPaidDeps = {
+    readChainId: async () => chainId,
+    readInvoice: async () => onchainInvoice(++invoiceReads >= 5 ? 2 : 1),
+    readReceipt: async () => successfulReceipt,
+    readTransaction: async () => transaction,
+    findPaymentLogs: async () => (++eventReads >= 1 ? [paidLog] : []),
+    findPendingTransactions: async () => [],
+  };
+  const attempt = await submitPaymentOnce({
+    submit: async () => {
+      submitCount += 1;
+      throw new Error('already known: nonce too low: next nonce 4, tx nonce 3');
+    },
+    waitForReceipt: async () => { throw new Error('Must not wait without a transaction hash.'); },
+    reconcile: ({ transactionHash, error }) => reconcilePaymentAttempt({
+      expected,
+      transactionHash,
+      error,
+      ...delayedPaidDeps,
+    }),
+  });
+  assert.equal(attempt.result.status, 'open', 'A stale first contract read is not misreported as Paid.');
+  assert.equal(attempt.result.ambiguous, true, 'already known and nonce-too-low errors remain ambiguous.');
+  const finalResult = await pollPaymentReconciliation({
+    initialResult: attempt.result,
+    reconcile: () => reconcilePaymentAttempt({ expected, error: attempt.error, ...delayedPaidDeps }),
+    intervalMs: 0,
+    maxAttempts: 4,
+    sleep: async () => {},
+  });
+  assert.equal(finalResult.status, 'paid', 'Bounded read-only polling catches the delayed on-chain Paid transition.');
+  assert.equal(finalResult.paymentTxHash, hash, 'The eventual confirmed event supplies the exact transaction hash.');
+  assert.equal(submitCount, 1, 'Polling never resubmits the payment.');
+}
+
+{
+  let readCount = 0;
+  const recovered = await pollPaymentReconciliation({
+    initialResult: { status: 'unavailable', ambiguous: true },
+    reconcile: async () => {
+      readCount += 1;
+      if (readCount === 1) throw new Error('Temporary Arc RPC read failure.');
+      return { status: 'paid', paymentTxHash: hash, ambiguous: true };
+    },
+    intervalMs: 0,
+    maxAttempts: 3,
+    sleep: async () => {},
+  });
+  assert.equal(recovered.status, 'paid', 'A temporary RPC failure is retried read-only until Paid is confirmed.');
+  assert.equal(readCount, 2);
+}
+
+{
+  let receiptSearches = 0;
+  const receiptLinked = await pollPaymentReconciliation({
+    initialResult: { status: 'paid', proofUnavailable: true, paymentTxHash: null },
+    reconcile: async () => {
+      receiptSearches += 1;
+      return receiptSearches === 1
+        ? { status: 'paid', proofUnavailable: true, paymentTxHash: null }
+        : { status: 'paid', proofUnavailable: false, paymentTxHash: hash };
+    },
+    intervalMs: 0,
+    maxAttempts: 3,
+    sleep: async () => {},
+  });
+  assert.equal(receiptLinked.status, 'paid', 'Paid remains confirmed while receipt discovery continues.');
+  assert.equal(receiptLinked.paymentTxHash, hash, 'A delayed explorer transaction link is attached without a page refresh.');
+  assert.equal(receiptSearches, 2);
+}
+
+{
+  let readCount = 0;
+  const stillPending = await pollPaymentReconciliation({
+    initialResult: { status: 'pending', paymentTxHash: hash, ambiguous: true },
+    reconcile: async () => {
+      readCount += 1;
+      return { status: 'pending', paymentTxHash: hash, ambiguous: true };
+    },
+    intervalMs: 0,
+    maxAttempts: 3,
+    sleep: async () => {},
+  });
+  assert.equal(stillPending.status, 'pending', 'Unresolved transactions remain pending after the bounded polling window.');
+  assert.equal(readCount, 3, 'Pending checks are bounded.');
 }
 
 {

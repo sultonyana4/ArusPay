@@ -264,3 +264,33 @@ export async function submitPaymentOnce({ submit, waitForReceipt, reconcile }) {
   const result = await reconcile({ transactionHash: extractedHash, receiptHint: receipt, error: reconciliationError });
   return { transactionHash: extractedHash, receipt, error, stage, ambiguous, result };
 }
+
+export async function pollPaymentReconciliation({
+  initialResult,
+  reconcile,
+  intervalMs = 2000,
+  maxAttempts = 30,
+  shouldContinue = () => true,
+  onUpdate = () => {},
+  sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+}) {
+  let result = initialResult;
+  const isSettled = (value) => (value?.status === 'paid'
+    && (!value.proofUnavailable || Boolean(value.paymentTxHash)))
+    || value?.status === 'reverted'
+    || value?.status === 'not-open'
+    || (value?.status === 'open' && !value.ambiguous);
+
+  for (let attempt = 0; attempt < maxAttempts && !isSettled(result); attempt += 1) {
+    if (!shouldContinue()) break;
+    await sleep(intervalMs);
+    if (!shouldContinue()) break;
+    try {
+      result = await reconcile();
+    } catch (error) {
+      result = { status: 'unavailable', reason: 'reconciliation-failed', ambiguous: true, error };
+    }
+    await onUpdate(result);
+  }
+  return result;
+}
