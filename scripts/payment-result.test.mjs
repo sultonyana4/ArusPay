@@ -3,9 +3,14 @@ import {
   encodeAbiParameters,
   encodeEventTopics,
   encodeFunctionData,
+  createWalletClient,
+  custom,
+  defineChain,
+  keccak256,
   parseUnits,
 } from 'viem';
 import {
+  broadcastSignedTransactionOnce,
   createPaymentSubmissionGate,
   getPaymentDisplayState,
   matchesPaymentTransaction,
@@ -75,6 +80,73 @@ const commonDeps = {
   findPaymentLogs: async () => [paidLog],
   findPendingTransactions: async () => [],
 };
+
+{
+  const signingChain = defineChain({
+    id: chainId,
+    name: 'Arc Testnet mock',
+    nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
+    rpcUrls: { default: { http: ['https://rpc.invalid.test'] } },
+  });
+  const methods = [];
+  const walletClient = createWalletClient({
+    account: payer,
+    chain: signingChain,
+    transport: custom({
+      request: async ({ method, params }) => {
+        methods.push(method);
+        if (method === 'eth_chainId') return `0x${chainId.toString(16)}`;
+        if (method === 'eth_signTransaction') {
+          assert.equal(params[0].from.toLowerCase(), payer);
+          assert.equal(params[0].to.toLowerCase(), contract);
+          assert.equal(BigInt(params[0].value), amount);
+          return '0x02f86c';
+        }
+        throw new Error(`Unexpected wallet RPC method: ${method}`);
+      },
+    }),
+  });
+  const signed = await walletClient.signTransaction({
+    account: payer,
+    chain: signingChain,
+    to: contract,
+    data: calldata,
+    value: amount,
+    nonce: 6,
+    gas: 60000n,
+    maxFeePerGas: 24_000_000_000n,
+    maxPriorityFeePerGas: 0n,
+  });
+  assert.equal(signed, '0x02f86c');
+  assert.deepEqual(methods, ['eth_chainId', 'eth_signTransaction'], 'The Privy wallet signs only; it does not broadcast via eth_sendTransaction.');
+}
+
+{
+  const signedTransaction = '0x02f86c';
+  const expectedHash = keccak256(signedTransaction);
+  let broadcastCount = 0;
+  const attempt = await submitPaymentOnce({
+    submit: () => broadcastSignedTransactionOnce({
+      serializedTransaction: signedTransaction,
+      broadcast: async (serialized) => {
+        broadcastCount += 1;
+        assert.equal(serialized, signedTransaction, 'The signed bytes are sent unchanged.');
+        throw new Error('already known: nonce too low: next nonce 7, tx nonce 6');
+      },
+    }),
+    waitForReceipt: async (transactionHash) => ({ transactionHash, status: 'success' }),
+    reconcile: async ({ transactionHash, receiptHint, error }) => ({
+      status: 'paid',
+      paymentTxHash: transactionHash,
+      receiptHint,
+      ambiguous: /already known|nonce too low/i.test(error?.cause?.message || error?.message || ''),
+    }),
+  });
+  assert.equal(attempt.transactionHash, expectedHash, 'The local signed-transaction hash survives a broadcast error.');
+  assert.equal(attempt.result.paymentTxHash, expectedHash, 'Reconciliation receives the exact signed-transaction hash.');
+  assert.equal(attempt.ambiguous, true, 'An already-known/old-nonce RPC response remains ambiguous.');
+  assert.equal(broadcastCount, 1, 'The signed transaction is broadcast once; no retry is sent.');
+}
 
 {
   const result = await reconcilePaymentAttempt({ expected, transactionHash: hash, ...commonDeps });
@@ -371,4 +443,4 @@ const commonDeps = {
   }
 }
 
-console.log('Payment-result regression tests passed (mocked reads only; no wallet, RPC, or transaction submission).');
+console.log('Payment-result regression tests passed (mocked wallet/RPC only; no real wallet, RPC, or transaction submission).');

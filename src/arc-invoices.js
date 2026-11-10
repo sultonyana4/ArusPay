@@ -4,6 +4,7 @@ import {
   custom,
   decodeEventLog,
   defineChain,
+  encodeFunctionData,
   formatUnits,
   getAddress,
   http,
@@ -18,6 +19,7 @@ import {
   walletDiagnosticsNextStep,
 } from './privy-diagnostics.js';
 import {
+  broadcastSignedTransactionOnce,
   createPaymentSubmissionGate,
   getPaymentDisplayState,
   isAmbiguousPaymentError,
@@ -119,6 +121,10 @@ const invoiceAbi = [
 ];
 
 const publicClient = createPublicClient({ chain: arcTestnet, transport: http(ARC_RPC) });
+const rawTransactionClient = createWalletClient({
+  chain: arcTestnet,
+  transport: http(ARC_RPC, { retryCount: 0 }),
+});
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 const shortAddress = (address) => `${address.slice(0, 6)}…${address.slice(-4)}`;
@@ -1036,14 +1042,39 @@ async function payInvoice(merchant, invoiceId, amount) {
       const fee = await estimateFee('payInvoice', [getAddress(merchant), invoiceId], account, current.amount);
       showToast(`Review wallet confirmation for ${formatUsdc(amount)} USDC plus an estimated ${formatUsdc(fee.fee)} USDC network fee.`);
       const attempt = await submitPaymentOnce({
-        submit: () => wallet.walletClient.writeContract({
-          account,
-          address: CONTRACT_ADDRESS,
-          abi: invoiceAbi,
-          functionName: 'payInvoice',
-          args: [getAddress(merchant), invoiceId],
-          value: current.amount,
-        }),
+        submit: async () => {
+          if (!['privy', 'privy-v2'].includes(activeWalletType)) {
+            return wallet.walletClient.writeContract({
+              account,
+              address: CONTRACT_ADDRESS,
+              abi: invoiceAbi,
+              functionName: 'payInvoice',
+              args: [getAddress(merchant), invoiceId],
+              value: current.amount,
+            });
+          }
+          const preparedTransaction = await publicClient.prepareTransactionRequest({
+            account,
+            chain: arcTestnet,
+            chainId: ARC_TESTNET_ID,
+            to: CONTRACT_ADDRESS,
+            data: encodeFunctionData({
+              abi: invoiceAbi,
+              functionName: 'payInvoice',
+              args: [getAddress(merchant), invoiceId],
+            }),
+            value: current.amount,
+          });
+          const serializedTransaction = await wallet.walletClient.signTransaction({
+            ...preparedTransaction,
+            account,
+            chain: arcTestnet,
+          });
+          return broadcastSignedTransactionOnce({
+            serializedTransaction,
+            broadcast: (serialized) => rawTransactionClient.sendRawTransaction({ serializedTransaction: serialized }),
+          });
+        },
         waitForReceipt: (hash) => publicClient.waitForTransactionReceipt({ hash, timeout: 45000, pollingInterval: 1500 }),
         reconcile: ({ transactionHash, receiptHint, error }) => reconcileOnchainPayment({
           merchant,

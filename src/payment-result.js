@@ -1,4 +1,4 @@
-import { decodeEventLog, decodeFunctionData, getAddress } from 'viem';
+import { decodeEventLog, decodeFunctionData, getAddress, keccak256 } from 'viem';
 
 const TX_HASH_PATTERN = /\b0x[0-9a-fA-F]{64}\b/;
 
@@ -26,6 +26,23 @@ export function extractTransactionHash(error) {
   const direct = [error?.transactionHash, error?.hash, error?.data?.transactionHash, error?.data?.hash]
     .find((value) => typeof value === 'string' && /^0x[0-9a-fA-F]{64}$/.test(value));
   return direct || errorText(error).match(TX_HASH_PATTERN)?.[0] || null;
+}
+
+export async function broadcastSignedTransactionOnce({ serializedTransaction, broadcast }) {
+  const transactionHash = keccak256(serializedTransaction);
+  try {
+    const returnedHash = await broadcast(serializedTransaction);
+    if (typeof returnedHash !== 'string' || returnedHash.toLowerCase() !== transactionHash.toLowerCase()) {
+      throw new Error('Arc Testnet RPC returned a transaction hash that does not match the signed transaction.');
+    }
+    return transactionHash;
+  } catch (cause) {
+    const error = Object.assign(
+      new Error(cause?.shortMessage || cause?.message || 'Arc Testnet transaction broadcast failed.'),
+      { cause, transactionHash },
+    );
+    throw error;
+  }
 }
 
 export function isAmbiguousPaymentError(error) {
