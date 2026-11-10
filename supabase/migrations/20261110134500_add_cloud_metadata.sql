@@ -21,6 +21,6 @@ comment on table public.payment_attempts is
 comment on column public.payment_attempts.tx_hash is
   'Wallet-reported hash for an ambiguous submission; never proof of payment.';
 comment on column public.merchant_invoices.client_name is
-  'Off-chain invoice recipient name; not stored on the ArusPay contract.';
+  'Off-chain invoice recipient name; not stored on the deployed invoice contract.';
 comment on column public.merchant_invoices.client_email is
-  'Off-chain invoice recipient email; not stored on the ArusPay contract.';
+  'Off-chain invoice recipient email; not stored on the deployed invoice contract.';

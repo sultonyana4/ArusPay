@@ -280,7 +280,7 @@ assert.equal(window.document.querySelector('#signin').classList.contains('hidden
 const invoiceId = `0x${'cf1f8e1b52d52d06e7c7eaa3383e5164c73b3a5bf1f9fd82b5e92261a4fca598'}`;
 const merchant = '0x4D3e3dc6D280cDd8Ba520F8E4B9AC3BF762BBDFe';
 const linkDom = new JSDOM(html, {
-  url: `https://aruspay-pi.vercel.app/?merchant=${merchant}&invoiceId=${invoiceId}`,
+  url: `https://termul.xyz/?merchant=${merchant}&invoiceId=${invoiceId}`,
   runScripts: 'outside-only',
   pretendToBeVisual: true,
 });

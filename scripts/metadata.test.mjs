@@ -17,7 +17,9 @@ const invoiceId = `0x${'ab'.repeat(32)}`;
 const txHash = `0x${'cd'.repeat(32)}`;
 const subject = 'did:privy:metadata-test';
 
-assert.equal(isAllowedOrigin(PRODUCTION_ORIGIN), true);
+assert.equal(isAllowedOrigin('https://termul.xyz'), true);
+assert.equal(isAllowedOrigin('https://termul-pay.vercel.app'), true);
+assert.equal(isAllowedOrigin(PRODUCTION_ORIGIN), true, 'The legacy production origin remains allowed during migration.');
 assert.equal(isAllowedOrigin('http://localhost:5173'), false);
 assert.equal(isAllowedOrigin('https://aruspay-git-main-sultonyana4-8806s-projects.vercel.app'), false);
 assert.equal(isAllowedOrigin('https://attacker.example'), false);

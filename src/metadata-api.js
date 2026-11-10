@@ -5,14 +5,14 @@ const paymentAttemptWrites = new Map();
 const currentUserId = () => globalThis.window?.arusPayCurrentPrivyUserId || null;
 
 async function request(action, payload = {}, expectedUserId = currentUserId()) {
-  if (!expectedUserId) throw new Error('Sign in with Privy to sync ArusPay metadata.');
+  if (!expectedUserId) throw new Error('Sign in with Privy to sync Termul metadata.');
   const assertSameUser = () => {
     if (currentUserId() !== expectedUserId) throw new Error('Your Privy account changed. Retry from the current account.');
   };
   assertSameUser();
   const accessToken = await globalThis.window?.arusPayPrivy?.getAccessToken?.();
   assertSameUser();
-  if (!accessToken) throw new Error('Sign in with Privy to sync ArusPay metadata.');
+  if (!accessToken) throw new Error('Sign in with Privy to sync Termul metadata.');
 
   const headers = {
     Authorization: `Bearer ${accessToken}`,
@@ -43,7 +43,7 @@ async function request(action, payload = {}, expectedUserId = currentUserId()) {
   assertSameUser();
   if (!response.ok) {
     if (response.status === 401) throw new Error('Your Privy session could not be verified. Sign in again and retry.');
-    throw new Error(result?.error || 'ArusPay cloud metadata is temporarily unavailable.');
+    throw new Error(result?.error || 'Termul cloud metadata is temporarily unavailable.');
   }
   return result || {};
 }

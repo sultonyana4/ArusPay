@@ -304,7 +304,7 @@ function setUncertainPaymentAttempt(merchant, invoiceId, payer, transactionHash 
   paymentReconciliationWatchComplete.delete(key);
   if (attempt.privyUserId && attempt.payer) {
     void metadataApi.savePaymentAttempt(merchant, invoiceId, attempt.payer, transactionHash)
-      .catch(() => showToast('The payment attempt could not sync to Supabase. ArusPay will continue checking the contract directly.'));
+      .catch(() => showToast('The payment attempt could not sync to Supabase. Termul will continue checking the contract directly.'));
   }
   return attempt;
 }
@@ -456,10 +456,10 @@ function startPaymentReconciliationWatch({ merchant, invoiceId, amount = null, p
         if (outcome.contractStatePending) {
           showToast('A matching InvoicePaid event and successful receipt confirm payment. The RPC contract-state read is catching up; no second payment is available.');
         } else if (outcome.paymentTxHash) {
-          showToast(`Paid on the ArusPay contract. Verified transaction: ${outcome.paymentTxHash}`);
+          showToast(`Paid on the invoice contract. Verified transaction: ${outcome.paymentTxHash}`);
         } else if (!paidWithoutHashToastShown) {
           paidWithoutHashToastShown = true;
-          showToast('The ArusPay contract confirms Paid. Checking for its transaction receipt and explorer link.');
+          showToast('The invoice contract confirms Paid. Checking for its transaction receipt and explorer link.');
         }
       } else if (outcome.status === 'reverted') {
         clearUncertainPaymentAttempt(merchant, invoiceId);
@@ -715,7 +715,7 @@ async function createOnchainInvoice() {
       };
       const fee = await estimateFee('createInvoice', [invoiceId, expected.amount, expiresAt], account);
       showToast(`Review wallet confirmation. Estimated network fee: ${formatUsdc(fee.fee)} USDC; paid by your wallet.`);
-      updateStatus('Waiting for wallet approval. ArusPay will submit this invoice only once.');
+      updateStatus('Waiting for wallet approval. Termul will submit this invoice only once.');
 
       const reconcile = (attempt = {}) => reconcileInvoiceCreationAttempt({
         expected,
@@ -768,7 +768,7 @@ async function createOnchainInvoice() {
       let outcome = attempt.result;
       if (!['created', 'reverted', 'failed', 'unmatched'].includes(outcome.status)) {
         updateStatus('Privy returned an ambiguous result. Checking the exact signed transaction and invoice event; do not retry or approve again.');
-        showToast('The wallet response does not prove failure. ArusPay is checking this exact invoice transaction; no second transaction will be sent.');
+        showToast('The wallet response does not prove failure. Termul is checking this exact invoice transaction; no second transaction will be sent.');
         outcome = await pollInvoiceCreationReconciliation({
           initialResult: outcome,
           reconcile: () => reconcile({
@@ -828,7 +828,7 @@ async function createOnchainInvoice() {
           : metadataSaveError || 'Invoice confirmed on Arc Testnet; its payment link is ready, but details could not sync to Supabase.');
       } else if (outcome.status === 'reverted') {
         setStatus('Arc Testnet confirmed that this transaction reverted. No invoice was created.');
-        showToast('The transaction reverted. No invoice is recorded, and ArusPay did not resend it.');
+        showToast('The transaction reverted. No invoice is recorded, and Termul did not resend it.');
       } else if (outcome.status === 'failed') {
         setStatus('No invoice transaction was confirmed. You may review the form and decide what to do next.');
         showToast(attempt.error?.shortMessage || attempt.error?.message || 'Invoice creation was not submitted.');
@@ -950,7 +950,7 @@ async function renderPayment() {
     const link = makeInvoiceLink(invoice.merchant, selected.invoiceId);
     const canPay = paymentDisplay.canPay;
     const stateClass = paymentDisplay.paid ? 'paid' : invoice.status === STATUS.cancelled || status === 'Expired' ? 'overdue' : 'pending';
-    view.innerHTML = `<div class="pay-crumb"><button class="table-link" id="payment-invoices">Invoices</button> <span style="color:#596578">/</span> <span class="mono">${escapeHtml(shortId(selected.invoiceId))}</span></div><div class="pay-layout"><section class="pay-main-card"><div class="pay-business"><div class="business-logo">AP</div><div><strong>ArusPay invoice</strong><span class="mono">${escapeHtml(shortId(selected.invoiceId))}</span></div></div><div class="pay-content"><span class="eyebrow">Arc Testnet · On-chain status</span><h1>${escapeHtml(status)}</h1><p>${known ? `Invoice for ${escapeHtml(known.name)}` : 'Invoice details read from Arc Testnet.'}</p><div class="pay-due"><div class="pay-due-label">${invoice.status === STATUS.paid ? 'Amount paid' : 'Amount due'}</div><div class="pay-due-amount">${escapeHtml(amount)} <span>USDC</span></div></div><div class="pay-network"><span class="chain-name"><i class="chain-icon">A</i> Arc Testnet</span><span class="status ${stateClass}">${escapeHtml(status)}</span></div><div class="availability-details"><span><b>Merchant</b> <span class="mono">${escapeHtml(invoice.merchant)}</span></span><span><b>Due / expiry</b> ${escapeHtml(due)}</span><span><b>Invoice ID</b> <span class="mono">${escapeHtml(selected.invoiceId)}</span></span></div><div class="fee-note"><span>ⓘ</span><span>Estimated fees are paid by your wallet in USDC. No gas sponsorship is used.</span></div>${canPay ? '<button class="btn btn-primary btn-full" id="pay-onchain" type="button">Pay invoice on Arc Testnet</button>' : ''}<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn btn-quiet btn-sm" id="copy-invoice-link" type="button">Copy payment link</button><a class="btn btn-quiet btn-sm" href="${EXPLORER}/address/${CONTRACT_ADDRESS}" target="_blank" rel="noreferrer">View contract</a></div>${known?.createTxHash ? `<p class="hint">Creation receipt: <a class="table-link" href="${EXPLORER}/tx/${known.createTxHash}" target="_blank" rel="noreferrer">${escapeHtml(shortAddress(known.createTxHash))}</a></p>` : ''}${known?.paymentTxHash ? `<p class="hint">Payment receipt: <a class="table-link" href="${EXPLORER}/tx/${known.paymentTxHash}" target="_blank" rel="noreferrer">${escapeHtml(shortAddress(known.paymentTxHash))}</a></p>` : ''}<p class="hint">Client name, email, descriptions, and notes are not written to the contract.</p></div></section><aside class="pay-summary"><h2>Invoice summary</h2><div class="summary-row"><span>Invoice number</span><strong>${escapeHtml(known?.id || shortId(selected.invoiceId))}</strong></div><div class="summary-row"><span>Client</span><strong>${escapeHtml(known?.name || 'Invoice recipient')}</strong></div><div class="summary-row"><span>Description</span><strong>${escapeHtml(known?.description || 'On-chain invoice')}</strong></div><div class="summary-row"><span>Due date</span><strong>${escapeHtml(due)}</strong></div><div class="summary-row summary-total"><span>Total</span><strong>${escapeHtml(amount)} USDC</strong></div><div class="payment-foot">State is read from the Arc Testnet contract.</div></aside></div>`;
+    view.innerHTML = `<div class="pay-crumb"><button class="table-link" id="payment-invoices">Invoices</button> <span style="color:#596578">/</span> <span class="mono">${escapeHtml(shortId(selected.invoiceId))}</span></div><div class="pay-layout"><section class="pay-main-card"><div class="pay-business"><div class="business-logo">AP</div><div><strong>Termul invoice</strong><span class="mono">${escapeHtml(shortId(selected.invoiceId))}</span></div></div><div class="pay-content"><span class="eyebrow">Arc Testnet · On-chain status</span><h1>${escapeHtml(status)}</h1><p>${known ? `Invoice for ${escapeHtml(known.name)}` : 'Invoice details read from Arc Testnet.'}</p><div class="pay-due"><div class="pay-due-label">${invoice.status === STATUS.paid ? 'Amount paid' : 'Amount due'}</div><div class="pay-due-amount">${escapeHtml(amount)} <span>USDC</span></div></div><div class="pay-network"><span class="chain-name"><i class="chain-icon">A</i> Arc Testnet</span><span class="status ${stateClass}">${escapeHtml(status)}</span></div><div class="availability-details"><span><b>Merchant</b> <span class="mono">${escapeHtml(invoice.merchant)}</span></span><span><b>Due / expiry</b> ${escapeHtml(due)}</span><span><b>Invoice ID</b> <span class="mono">${escapeHtml(selected.invoiceId)}</span></span></div><div class="fee-note"><span>ⓘ</span><span>Estimated fees are paid by your wallet in USDC. No gas sponsorship is used.</span></div>${canPay ? '<button class="btn btn-primary btn-full" id="pay-onchain" type="button">Pay invoice on Arc Testnet</button>' : ''}<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn btn-quiet btn-sm" id="copy-invoice-link" type="button">Copy payment link</button><a class="btn btn-quiet btn-sm" href="${EXPLORER}/address/${CONTRACT_ADDRESS}" target="_blank" rel="noreferrer">View contract</a></div>${known?.createTxHash ? `<p class="hint">Creation receipt: <a class="table-link" href="${EXPLORER}/tx/${known.createTxHash}" target="_blank" rel="noreferrer">${escapeHtml(shortAddress(known.createTxHash))}</a></p>` : ''}${known?.paymentTxHash ? `<p class="hint">Payment receipt: <a class="table-link" href="${EXPLORER}/tx/${known.paymentTxHash}" target="_blank" rel="noreferrer">${escapeHtml(shortAddress(known.paymentTxHash))}</a></p>` : ''}<p class="hint">Client name, email, descriptions, and notes are not written to the contract.</p></div></section><aside class="pay-summary"><h2>Invoice summary</h2><div class="summary-row"><span>Invoice number</span><strong>${escapeHtml(known?.id || shortId(selected.invoiceId))}</strong></div><div class="summary-row"><span>Client</span><strong>${escapeHtml(known?.name || 'Invoice recipient')}</strong></div><div class="summary-row"><span>Description</span><strong>${escapeHtml(known?.description || 'On-chain invoice')}</strong></div><div class="summary-row"><span>Due date</span><strong>${escapeHtml(due)}</strong></div><div class="summary-row summary-total"><span>Total</span><strong>${escapeHtml(amount)} USDC</strong></div><div class="payment-foot">State is read from the Arc Testnet contract.</div></aside></div>`;
     if (known?.paymentTxHash && !paymentReconciliation?.paymentTxHash) {
       const staleReceipt = [...view.querySelectorAll('a')]
         .find((anchor) => anchor.href === `${EXPLORER}/tx/${known.paymentTxHash}`);
@@ -969,10 +969,10 @@ async function renderPayment() {
       const paidMessage = document.createElement('p');
       paidMessage.className = 'hint';
       paidMessage.textContent = paymentReconciliation.contractStatePending
-        ? 'A matching InvoicePaid event and successful receipt confirm Paid. The RPC contract-state read is catching up; ArusPay keeps payment locked and will verify again automatically.'
+        ? 'A matching InvoicePaid event and successful receipt confirm Paid. The RPC contract-state read is catching up; Termul keeps payment locked and will verify again automatically.'
         : paymentReconciliation.paymentTxHash
-        ? `Paid on the ArusPay contract. Verified payer: ${paymentReconciliation.payer}. Transaction hash: `
-        : 'Paid on the ArusPay contract. The payment receipt and exact transaction hash are not available from the RPC yet; check status again.';
+        ? `Paid on the invoice contract. Verified payer: ${paymentReconciliation.payer}. Transaction hash: `
+        : 'Paid on the invoice contract. The payment receipt and exact transaction hash are not available from the RPC yet; check status again.';
       resultPanel.append(paidMessage);
       if (paymentReconciliation.paymentTxHash) {
         const receiptLink = document.createElement('a');
@@ -998,14 +998,14 @@ async function renderPayment() {
       const stateMessage = document.createElement('p');
       stateMessage.className = 'hint';
       stateMessage.textContent = paymentReconciliation?.status === 'pending'
-        ? 'The contract still reports Open, but a matching payment transaction is pending. If Privy’s wallet popup still shows an error, close it with X—do not tap “Retry transaction” or approve again. Leave this page open while ArusPay checks the receipt; no second payment is being submitted.'
+        ? 'The contract still reports Open, but a matching payment transaction is pending. If Privy’s wallet popup still shows an error, close it with X—do not tap “Retry transaction” or approve again. Leave this page open while Termul checks the receipt; no second payment is being submitted.'
         : paymentReconciliation?.status === 'unavailable'
           ? paymentReconciliationWatchers.has(paymentAttemptKey(selected.merchant, selected.invoiceId))
-            ? 'The last payment request has an uncertain result. If Privy’s wallet popup still shows an error, close it with X—do not tap “Retry transaction” or approve again. Leave this page open; ArusPay is checking the contract and payment events without submitting another payment.'
+            ? 'The last payment request has an uncertain result. If Privy’s wallet popup still shows an error, close it with X—do not tap “Retry transaction” or approve again. Leave this page open; Termul is checking the contract and payment events without submitting another payment.'
             : 'The last payment request has an uncertain result, and the contract could not be re-read. Close any Privy error popup with X—do not tap “Retry transaction” or approve again. No second payment is available; leave this page open and check status again when the RPC responds.'
           : paymentReconciliationWatchers.has(paymentAttemptKey(selected.merchant, selected.invoiceId))
-            ? 'Privy’s wallet error or nonce message does not prove payment failed. Close the popup with X—do not tap “Retry transaction” or approve again. Leave this page open; ArusPay is checking the contract and matching payment events automatically, with payment locked.'
-            : 'Privy’s wallet error or nonce message does not prove payment failed. Close the popup with X—do not tap “Retry transaction” or approve again. The invoice still reads Open, so payment remains locked while ArusPay checks again.';
+            ? 'Privy’s wallet error or nonce message does not prove payment failed. Close the popup with X—do not tap “Retry transaction” or approve again. Leave this page open; Termul is checking the contract and matching payment events automatically, with payment locked.'
+            : 'Privy’s wallet error or nonce message does not prove payment failed. Close the popup with X—do not tap “Retry transaction” or approve again. The invoice still reads Open, so payment remains locked while Termul checks again.';
       resultPanel.append(stateMessage);
       if (paymentReconciliation?.status === 'pending' && paymentReconciliation.paymentTxHash) {
         const pendingLink = document.createElement('a');
@@ -1059,7 +1059,7 @@ async function renderPayment() {
       walletHint.className = 'hint';
       walletHint.setAttribute('role', 'status');
       walletHint.textContent = !activeWalletAddress
-        ? 'Invoice status is read from the ArusPay contract. Connect an Ethereum wallet to pay.'
+        ? 'Invoice status is read from the deployed invoice contract. Connect an Ethereum wallet to pay.'
         : activeWalletProviderState === 'checking'
           ? `Checking the ${isPrivyWallet ? 'Privy ' : ''}wallet provider and verifying Arc Testnet (chain ID ${ARC_TESTNET_ID}) using a read-only request. No signature or transaction has been requested.`
           : !providerVerified
@@ -1204,8 +1204,8 @@ async function payInvoice(merchant, invoiceId, amount) {
         showToast(outcome.contractStatePending
           ? 'A matching InvoicePaid event and successful receipt confirm payment. The RPC contract-state read is catching up; no second payment is available.'
           : outcome.paymentTxHash
-          ? `Paid on the ArusPay contract. Verified transaction: ${outcome.paymentTxHash}`
-          : 'The ArusPay contract confirms Paid, but the RPC has not returned a verifiable transaction hash. Check status again.');
+          ? `Paid on the invoice contract. Verified transaction: ${outcome.paymentTxHash}`
+          : 'The invoice contract confirms Paid, but the RPC has not returned a verifiable transaction hash. Check status again.');
       } else if (outcome.status === 'reverted') {
         clearUncertainPaymentAttempt(merchant, invoiceId);
         await renderPayment();
@@ -1234,10 +1234,10 @@ async function payInvoice(merchant, invoiceId, amount) {
         const ambiguousWalletResult = attempt.ambiguous || isAmbiguousPaymentError(attempt.error);
         showToast(outcome.status === 'unavailable'
           ? ambiguousWalletResult
-            ? 'Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. ArusPay is checking the contract and payment events. No second payment was submitted.'
+            ? 'Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. Termul is checking the contract and payment events. No second payment was submitted.'
             : 'The contract status could not be verified. No second payment was submitted; check status again when the RPC responds.'
           : ambiguousWalletResult
-            ? 'Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. ArusPay is checking the contract and payment events. No second payment was submitted.'
+            ? 'Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. Termul is checking the contract and payment events. No second payment was submitted.'
             : 'The result is not yet conclusive. No second payment was submitted; check wallet activity and contract status before deciding what to do.');
       }
     } catch (error) {
@@ -1271,7 +1271,7 @@ async function payInvoice(merchant, invoiceId, amount) {
         || outcome.ambiguous || isAmbiguousPaymentError(error)) {
         setUncertainPaymentAttempt(merchant, invoiceId, account, outcome.paymentTxHash, amount);
         await renderPayment();
-        showToast('Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. ArusPay is checking the contract and payment events. No second payment was submitted.');
+        showToast('Privy returned an ambiguous wallet or nonce message; it does not prove payment failed. Termul is checking the contract and payment events. No second payment was submitted.');
       } else if (outcome.status === 'not-open') {
         clearUncertainPaymentAttempt(merchant, invoiceId);
         await renderPayment();

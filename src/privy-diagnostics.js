@@ -120,7 +120,7 @@ export function formatSafeWalletDiagnostics(diagnostics) {
     ? 'initializing'
     : safe.privyAuthenticated ? 'ready, authenticated' : 'ready, not authenticated';
   return [
-    'ArusPay wallet diagnostics (read-only)',
+    'Termul wallet diagnostics (read-only)',
     `Privy session: ${session}`,
     `useWallets.ready: ${safe.useWalletsReady ? 'true' : 'false'}`,
     `Connected EVM wallets: ${safe.connectedEvmWalletCount}${safe.connectedEvmWalletTypes.length

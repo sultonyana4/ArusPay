@@ -1,6 +1,6 @@
-# ArusPay invoice contract on Arc Testnet
+# Termul app — ArusPayInvoices contract on Arc Testnet
 
-`ArusPayInvoices.sol` implements non-custodial invoice settlement using Arc's native-USDC interface. The ArusPay app is configured for the following Arc Testnet deployment:
+`ArusPayInvoices.sol` implements non-custodial invoice settlement using Arc's native-USDC interface. The Termul app is configured for the following Arc Testnet deployment:
 
 - Chain ID: `5042002`
 - RPC: `https://rpc.testnet.arc.io`

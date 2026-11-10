@@ -3,6 +3,7 @@ export const PRIVY_ISSUER = 'privy.io';
 export const ARC_CHAIN_ID = 5042002;
 export const ARUSPAY_CONTRACT_ADDRESS = '0x0cc3b91fc603ef15d80b3c0e8db222e5988b8926';
 export const PRODUCTION_ORIGIN = 'https://aruspay-pi.vercel.app';
+export const PRODUCTION_ORIGINS = new Set(['https://termul.xyz', 'https://termul-pay.vercel.app', PRODUCTION_ORIGIN]);
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const HASH_RE = /^0x[0-9a-fA-F]{64}$/;
@@ -17,7 +18,7 @@ export class InputError extends Error {
 }
 
 export function isAllowedOrigin(origin) {
-  return origin === PRODUCTION_ORIGIN;
+  return PRODUCTION_ORIGINS.has(origin);
 }
 
 function requiredText(value, field, maxLength) {
