@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
-import { PrivyProvider, useExportWallet, useLinkAccount, useLogin, usePrivy, useWallets } from '@privy-io/react-auth';
+import { PrivyProvider, getIdentityToken, useExportWallet, useLinkAccount, useLogin, usePrivy, useWallets } from '@privy-io/react-auth';
 import { defineChain } from 'viem';
 import { selectWalletsForOnchainSync, waitForConnectedEthereumProvider } from './privy-wallets.js';
 import { createSafeWalletDiagnostics } from './privy-diagnostics.js';
@@ -19,7 +19,7 @@ const appId = import.meta.env.VITE_PRIVY_APP_ID || 'cmw96cg3m00c30hl5gg2jvnxa';
 
 function PrivyBridge() {
   const { login } = useLogin();
-  const { authenticated, ready, user, logout } = usePrivy();
+  const { authenticated, ready, user, logout, getAccessToken } = usePrivy();
   const { wallets, ready: walletsAreReady } = useWallets();
   const walletsRef = useRef(wallets || []);
   walletsRef.current = wallets || [];
@@ -86,6 +86,8 @@ function PrivyBridge() {
 
   useEffect(() => {
     window.arusPayPrivy = {
+      getAccessToken: async () => authenticated ? getAccessToken() : null,
+      getIdentityToken: async () => authenticated ? getIdentityToken() : null,
       login: async (method) => {
         const loginMethod = method === 'x' ? 'twitter' : method;
         try {
@@ -140,7 +142,7 @@ function PrivyBridge() {
     return () => {
       delete window.arusPayPrivy;
     };
-  }, [authenticated, exportWallet, linkTwitter, login, logout, ready, wallets, walletsAreReady]);
+  }, [authenticated, exportWallet, getAccessToken, linkTwitter, login, logout, ready, wallets, walletsAreReady]);
 
   useEffect(() => {
     if (!ready) return;

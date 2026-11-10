@@ -36,6 +36,14 @@ const dom = new JSDOM(html, {
 const { window } = dom;
 const copied = [];
 window.navigator.clipboard = { writeText: async (address) => { copied.push(address); } };
+const profileSaves = [];
+window.arusPayMetadata = {
+  getProfile: async () => ({ profile: null }),
+  saveProfile: async (displayName) => {
+    profileSaves.push(displayName);
+    return { profile: { display_name: displayName } };
+  },
+};
 const inlineScripts = [...window.document.querySelectorAll('script:not([src])')]
   .map((script) => script.textContent)
   .filter(Boolean);
@@ -44,6 +52,7 @@ assert.equal(window.document.querySelector('#received-total').textContent, '—'
 assert.equal(window.document.querySelector('#outstanding-total').textContent, '—');
 assert.equal(window.document.querySelector('#paid-count').textContent, '—');
 assert.match(window.document.querySelector('#invoice-empty').textContent, /Connect a Privy wallet/);
+assert.doesNotMatch(html, /localStorage|sessionStorage/, 'The application must not persist profile or invoice metadata in browser storage.');
 
 const exported = [];
 let linked = 0;
@@ -211,14 +220,15 @@ await new Promise((resolve) => setTimeout(resolve, 0));
 assert.deepEqual(copied, [address]);
 
 const name = window.document.querySelector('#display-name-input');
-name.value = 'Local Profile';
+name.value = 'Cloud Profile';
 window.document.querySelector('#display-name-form').dispatchEvent(new window.Event('submit', {
   bubbles: true,
   cancelable: true,
 }));
-assert.equal(window.localStorage.getItem('aruspay:profile-display-name:did:privy:smoke-test'), 'Local Profile');
-assert.equal(window.localStorage.length, 1, 'Only the local display name is stored in this test.');
-assert.match(window.document.querySelector('#display-name-status').textContent, /not synced to a cloud profile/);
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.deepEqual(profileSaves, ['Cloud Profile'], 'Display names are saved through the authenticated Supabase API.');
+assert.equal(window.localStorage.length, 0, 'The app must not save profile data in browser storage.');
+assert.match(window.document.querySelector('#display-name-status').textContent, /Supabase and synced across devices/);
 window.document.querySelector('#link-x-button').click();
 assert.equal(linked, 0, 'An already-linked X account must not start a new link flow.');
 
@@ -238,9 +248,17 @@ const noXUser = {
   id: 'did:privy:no-x',
   linkedAccounts: [{ type: 'email', address: 'no-x@example.test' }],
 };
+let finishOldProfileSave;
+window.arusPayMetadata.saveProfile = () => new Promise(resolve => { finishOldProfileSave = resolve; });
+name.value = 'Old account delayed name';
+window.document.querySelector('#display-name-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
 window.arusPayAuthenticated(noXUser, []);
 window.navigate('profile');
-assert.notEqual(window.document.querySelector('#display-name-input').value, 'Local Profile', 'Names must be scoped to each Privy user.');
+finishOldProfileSave({ profile: { display_name: 'Old account delayed name' } });
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.notEqual(window.document.querySelector('#display-name-input').value, 'Old account delayed name', 'A late save response must not contaminate a different account.');
+assert.equal(window.document.querySelector('#display-name-form [type=submit]').disabled, false, 'Switching accounts must release the previous account save button.');
+assert.notEqual(window.document.querySelector('#display-name-input').value, 'Cloud Profile', 'Names must be scoped to each Privy user.');
 window.document.querySelector('#link-x-button').click();
 assert.equal(linked, 1, 'An unlinked X account must call the Privy link method.');
 assert.match(window.document.querySelector('#wallet-address-list').textContent, /No Privy embedded EVM wallet found/);
@@ -280,5 +298,5 @@ assert.equal(linkDom.window.document.querySelector('#payment').classList.contain
 assert.equal(linkDom.window.arusPayApi.getSelectedInvoice().invoiceId, invoiceId, 'The linked invoice selection must survive sign-out.');
 linkDom.window.close();
 
-console.log('PASS: profile route, linked identities, copy actions, local-only name, user isolation, X-link gating, export confirmation/cancel, wallet provider readiness and fallback safety, embedded-wallet-only states, and payment-link routing.');
+console.log('PASS: profile route, Supabase-backed display names, no app localStorage persistence, user isolation, linked identities, copy actions, X-link gating, export confirmation/cancel, wallet provider readiness and fallback safety, embedded-wallet-only states, and payment-link routing.');
 dom.window.close();

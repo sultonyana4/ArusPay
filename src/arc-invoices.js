@@ -23,6 +23,7 @@ import {
   reconcilePaymentAttempt,
   submitPaymentOnce,
 } from './payment-result.js';
+import { metadataApi } from './metadata-api.js';
 
 const ARC_TESTNET_ID = 5042002;
 const ARC_ENV = import.meta.env || {};
@@ -33,10 +34,10 @@ const CONTRACT_START_BLOCK = BigInt(ARC_ENV.VITE_ARUSPAY_DEPLOYMENT_BLOCK || '71
 const LOG_BLOCK_RANGE = 9999n;
 const EXPLORER = 'https://explorer.testnet.arc.io';
 const STATUS = { none: 0, open: 1, paid: 2, cancelled: 3 };
-const PAYMENT_ATTEMPT_STORAGE = 'aruspay:uncertain-payment:v1:';
 const uncertainPaymentAttempts = new Map();
 const paymentReconciliationWatchers = new Map();
 const paymentReconciliationWatchComplete = new Set();
+let metadataSyncUnavailable = false;
 
 const arcTestnet = defineChain({
   id: ARC_TESTNET_ID,
@@ -263,19 +264,14 @@ async function getOnchainInvoice(merchant, invoiceId) {
 }
 
 function paymentAttemptKey(merchant, invoiceId) {
-  return `${PAYMENT_ATTEMPT_STORAGE}${merchant.toLowerCase()}:${String(invoiceId).toLowerCase()}`;
+  return `${merchant.toLowerCase()}:${String(invoiceId).toLowerCase()}`;
 }
 function getUncertainPaymentAttempt(merchant, invoiceId) {
   const key = paymentAttemptKey(merchant, invoiceId);
-  let attempt = uncertainPaymentAttempts.get(key) || null;
-  try {
-    const saved = window.localStorage.getItem(key);
-    if (saved) attempt = JSON.parse(saved);
-  } catch {
-    // The in-memory marker remains available when browser storage is blocked.
-  }
+  const attempt = uncertainPaymentAttempts.get(key) || null;
   return attempt && attempt.merchant?.toLowerCase() === merchant.toLowerCase()
-    && attempt.invoiceId?.toLowerCase() === invoiceId.toLowerCase() ? attempt : null;
+    && attempt.invoiceId?.toLowerCase() === invoiceId.toLowerCase()
+    && attempt.privyUserId === window.arusPayCurrentPrivyUserId ? attempt : null;
 }
 
 function setUncertainPaymentAttempt(merchant, invoiceId, payer, transactionHash = null, amount = null) {
@@ -287,10 +283,14 @@ function setUncertainPaymentAttempt(merchant, invoiceId, payer, transactionHash 
     transactionHash,
     amount: amount === null || amount === undefined ? null : BigInt(amount).toString(),
     updatedAt: Date.now(),
+    privyUserId: window.arusPayCurrentPrivyUserId || null,
   };
   uncertainPaymentAttempts.set(key, attempt);
   paymentReconciliationWatchComplete.delete(key);
-  try { window.localStorage.setItem(key, JSON.stringify(attempt)); } catch { /* Keep the session marker. */ }
+  if (attempt.privyUserId && attempt.payer) {
+    void metadataApi.savePaymentAttempt(merchant, invoiceId, attempt.payer, transactionHash)
+      .catch(() => showToast('The payment attempt could not sync to Supabase. ArusPay will continue checking the contract directly.'));
+  }
   return attempt;
 }
 
@@ -298,7 +298,33 @@ function clearUncertainPaymentAttempt(merchant, invoiceId) {
   const key = paymentAttemptKey(merchant, invoiceId);
   uncertainPaymentAttempts.delete(key);
   paymentReconciliationWatchComplete.delete(key);
-  try { window.localStorage.removeItem(key); } catch { /* In-memory state is still cleared. */ }
+  if (window.arusPayCurrentPrivyUserId) {
+    void metadataApi.clearPaymentAttempt(merchant, invoiceId).catch(() => {});
+  }
+}
+
+function hydrateUncertainPaymentAttempt(merchant, invoiceId, row) {
+  if (!row || !window.arusPayCurrentPrivyUserId) return null;
+  try {
+    const attempt = {
+      merchant: getAddress(merchant),
+      invoiceId,
+      payer: getAddress(row.payer_address),
+      transactionHash: row.tx_hash || null,
+      amount: null,
+      updatedAt: Date.parse(row.updated_at) || Date.now(),
+      privyUserId: window.arusPayCurrentPrivyUserId,
+    };
+    uncertainPaymentAttempts.set(paymentAttemptKey(merchant, invoiceId), attempt);
+    return attempt;
+  } catch {
+    return null;
+  }
+}
+
+function clearLocalPaymentAttemptCache() {
+  uncertainPaymentAttempts.clear();
+  paymentReconciliationWatchComplete.clear();
 }
 
 async function getInvoicePaymentLogs(merchant, invoiceId) {
@@ -352,6 +378,7 @@ async function reconcileOnchainPayment({ merchant, invoiceId, amount, payer, tra
 
 function startPaymentReconciliationWatch({ merchant, invoiceId, amount = null, payer = null, initialResult }) {
   const key = paymentAttemptKey(merchant, invoiceId);
+  const watchUserId = window.arusPayCurrentPrivyUserId;
   if (paymentReconciliationWatchers.has(key) || paymentReconciliationWatchComplete.has(key)) return;
   let expectedAmount = amount === null || amount === undefined ? null : BigInt(amount);
   let paidWithoutHashToastShown = false;
@@ -363,7 +390,8 @@ function startPaymentReconciliationWatch({ merchant, invoiceId, amount = null, p
     initialResult,
     intervalMs: 2000,
     maxAttempts: 30,
-    shouldContinue: () => Boolean(getUncertainPaymentAttempt(merchant, invoiceId)),
+    shouldContinue: () => window.arusPayCurrentPrivyUserId === watchUserId
+      && Boolean(getUncertainPaymentAttempt(merchant, invoiceId)),
     reconcile: async () => {
       const attempt = getUncertainPaymentAttempt(merchant, invoiceId);
       if (!attempt) return { status: 'settled', ambiguous: false };
@@ -470,6 +498,14 @@ async function syncMerchantInvoices(merchantAddress) {
   const merchant = getAddress(merchantAddress);
   const chainId = await publicClient.getChainId();
   if (chainId !== ARC_TESTNET_ID) throw new Error('Arc Testnet could not be verified. Invoice data was not updated.');
+  let storedRows = [];
+  try {
+    const result = await metadataApi.listInvoices(merchant);
+    storedRows = Array.isArray(result?.invoices) ? result.invoices : [];
+    metadataSyncUnavailable = false;
+  } catch {
+    metadataSyncUnavailable = true;
+  }
   const latestBlock = await publicClient.getBlockNumber();
   const [createdLogs, paidLogs] = await Promise.all([
     getMerchantEventLogs('InvoiceCreated', merchant, latestBlock),
@@ -484,10 +520,26 @@ async function syncMerchantInvoices(merchantAddress) {
     paidByInvoice.set(key, log);
   }
 
-  const previousInvoices = window.arusPayApi?.getInvoices() || [];
-  const previousById = new Map(previousInvoices
-    .filter((item) => item.invoiceId)
-    .map((item) => [item.invoiceId.toLowerCase(), item]));
+  const metadataById = new Map(storedRows
+    .filter((row) => row?.invoice_id && row.merchant_address?.toLowerCase() === merchant.toLowerCase())
+    .map((row) => {
+      const name = row.client_name || 'On-chain invoice';
+      return [row.invoice_id.toLowerCase(), {
+        id: `INV-${row.invoice_id.slice(2, 10).toUpperCase()}`,
+        invoiceId: row.invoice_id,
+        merchant,
+        name,
+        email: row.client_email || '',
+        description: row.description || 'On-chain invoice',
+        initials: name.split(/\s+/).filter(Boolean).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'AP',
+      }];
+    }));
+  const previousById = new Map(metadataById);
+  for (const item of window.arusPayApi?.getInvoices() || []) {
+    if (!item.invoiceId) continue;
+    const key = item.invoiceId.toLowerCase();
+    previousById.set(key, { ...previousById.get(key), ...item });
+  }
   const timestampCache = new Map();
   const synced = [];
   for (const createdLog of createdLogs) {
@@ -650,6 +702,25 @@ async function createOnchainInvoice() {
       onchainVerified: true,
     };
     window.arusPayApi?.addInvoice(record);
+    let metadataSaved = true;
+    let metadataSaveError = '';
+    try {
+      await metadataApi.saveInvoice({
+        chainId: ARC_TESTNET_ID,
+        contractAddress: CONTRACT_ADDRESS,
+        merchantAddress: account,
+        invoiceId,
+        amountNative: metadata.amountBase,
+        clientName: metadata.name,
+        clientEmail: metadata.email,
+        description: metadata.description,
+        expiresAt: expiresAt.toString(),
+        createTxHash: hash,
+      });
+    } catch (error) {
+      metadataSaved = false;
+      metadataSaveError = error?.message || '';
+    }
     form.reset();
     $$('.line-item').slice(1).forEach((line) => line.remove());
     const first = $$('.line-item')[0];
@@ -657,7 +728,9 @@ async function createOnchainInvoice() {
     first.querySelector('.item-description').value = '';
     first.querySelector('.item-price').value = '';
     window.updatePreview?.();
-    showToast('Invoice confirmed on Arc Testnet.');
+    showToast(metadataSaved
+      ? 'Invoice confirmed on Arc Testnet and its details synced to Supabase.'
+      : metadataSaveError || 'Invoice confirmed on Arc Testnet, but its details could not sync to Supabase.');
   } catch (error) {
     showToast(error?.shortMessage || error?.message || 'Invoice creation failed. No success is recorded without a confirmed receipt.');
   } finally {
@@ -696,6 +769,15 @@ async function renderPayment() {
     let invoice = await getOnchainInvoice(selected.merchant, selected.invoiceId);
     if (requestId !== paymentRenderRequest) return;
     let paymentAttempt = getUncertainPaymentAttempt(selected.merchant, selected.invoiceId);
+    if (!paymentAttempt) {
+      try {
+        const stored = await metadataApi.getPaymentAttempt(selected.merchant, selected.invoiceId);
+        if (requestId !== paymentRenderRequest) return;
+        paymentAttempt = hydrateUncertainPaymentAttempt(selected.merchant, selected.invoiceId, stored?.attempt);
+      } catch {
+        // A cloud hint never substitutes for the contract read above.
+      }
+    }
     let paymentReconciliation = null;
     if (invoice.status === STATUS.paid || paymentAttempt) {
       paymentReconciliation = await reconcileOnchainPayment({
@@ -1274,9 +1356,12 @@ async function refreshArcDashboard(address = activeWalletAddress) {
   if (invoicesResult.status === 'fulfilled') {
     const syncedInvoices = invoicesResult.value;
     window.arusPayApi?.replaceInvoices(syncedInvoices);
-    setInvoiceSyncStatus(syncedInvoices.length
+    const syncMessage = syncedInvoices.length
       ? `${syncedInvoices.length} invoice${syncedInvoices.length === 1 ? '' : 's'} synced from Arc Testnet.`
-      : 'No invoice events found for this wallet on Arc Testnet.');
+      : 'No invoice events found for this wallet on Arc Testnet.';
+    setInvoiceSyncStatus(metadataSyncUnavailable
+      ? `${syncMessage} Supabase metadata is unavailable; showing contract details only.`
+      : syncMessage);
   } else {
     const message = invoicesResult.reason?.shortMessage || invoicesResult.reason?.message || 'Arc Testnet invoices could not be read.';
     setInvoiceSyncStatus('Invoice sync unavailable · refresh to retry', message);
@@ -1287,6 +1372,7 @@ async function refreshArcDashboard(address = activeWalletAddress) {
 }
 
 window.arusPayRefreshSync = () => refreshArcDashboard();
+if (window.arusPayApi) window.arusPayApi.clearPaymentAttemptCache = clearLocalPaymentAttemptCache;
 ['#refresh-chain-sync', '#profile-refresh-chain-sync'].forEach((selector) => {
   $(selector)?.addEventListener('click', () => {
     if (activeWalletAddress) void refreshArcDashboard(activeWalletAddress);

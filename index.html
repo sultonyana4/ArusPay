@@ -141,22 +141,85 @@ function updatePayment(){
  view.innerHTML=`<div class="pay-crumb"><button class="table-link" id="payment-invoices">Invoices</button> <span style="color:#596578">/</span> <span>${escapeHtml(invoice.id)}</span></div><div class="pay-layout"><section class="pay-main-card" id="pay-content-card"><div class="pay-business"><div class="business-logo">AP</div><div><strong>ArusPay invoice</strong><span>${escapeHtml(invoice.id)}</span></div></div>${paymentContent}</section><aside class="pay-summary"><h2>Invoice summary</h2><div class="summary-row"><span>Invoice number</span><strong>${escapeHtml(invoice.id)}</strong></div><div class="summary-row"><span>Client</span><strong>${escapeHtml(invoice.name)}</strong></div><div class="summary-row"><span>Description</span><strong>${escapeHtml(invoice.description)}</strong></div><div class="summary-row"><span>Due date</span><strong>${escapeHtml(formatDate(invoice.due))}</strong></div><div class="summary-row summary-total"><span>Total due</span><strong>${usd(invoice.amount)} USDC</strong></div><div class="secure-note"><span style="color:var(--amber)">ⓘ</span><span>Network fees are paid by your wallet in USDC. This app does not sponsor gas.</span></div></aside></div>`;
  $('#payment-invoices').addEventListener('click',()=>navigate('dashboard'));$('#payment-back').addEventListener('click',()=>navigate('dashboard'))
 }
-function profileStorageKey(){return currentPrivyUser?.id?`aruspay:profile-display-name:${currentPrivyUser.id}`:null}
+let savedProfileName = '';
+let profileLoadRequest = 0;
 function getEmbeddedEvmWallets(){const candidates=[...(window.arusPayWallets||[]),...(currentPrivyUser?.linkedAccounts||[])];const seen=new Set();return candidates.filter(wallet=>{const address=wallet?.address;const isEmbedded=['privy','privy-v2'].includes(wallet?.walletClientType);const isEvm=['ethereum','evm'].includes(wallet?.chainType);if(!address||!isEmbedded||!isEvm||seen.has(address.toLowerCase()))return false;seen.add(address.toLowerCase());return true})}
 function defaultProfileName(user){const linked=user?.linkedAccounts||[];const accountName=linked.find(account=>account.name)?.name||linked.find(account=>account.username)?.username||'';const email=user?.email?.address||linked.find(account=>account.type==='email'&&account.address)?.address||linked.find(account=>account.email)?.email||'';return accountName||(email?email.split('@')[0]:'')}
-function updateUserProfile(user){currentPrivyUser=user||null;const linked=user?.linkedAccounts||[];const email=user?.email?.address||linked.find(account=>account.type==='email'&&account.address)?.address||linked.find(account=>account.email)?.email||'';let savedName='';try{const key=profileStorageKey();savedName=key?localStorage.getItem(key)||'':''}catch{}const name=savedName||defaultProfileName(user);const shownName=name||'Privy user';const initials=shownName.split(/[ ._-]+/).filter(Boolean).slice(0,2).map(part=>part[0]).join('').toUpperCase()||'AP';$('#profile-name').textContent=shownName;$('#profile-email').textContent=email||'Signed in with Privy';$('#profile-avatar').textContent=initials;$('#topbar-avatar').textContent=initials;const input=$('#display-name-input');if(input)input.value=savedName||defaultProfileName(user);if(user)renderProfile()}
+function renderUserProfile(user){
+ const linked=user?.linkedAccounts||[];
+ const email=user?.email?.address||linked.find(account=>account.type==='email'&&account.address)?.address||linked.find(account=>account.email)?.email||'';
+ const name=savedProfileName||defaultProfileName(user);
+ const shownName=name||'Privy user';
+ const initials=shownName.split(/[ ._-]+/).filter(Boolean).slice(0,2).map(part=>part[0]).join('').toUpperCase()||'AP';
+ $('#profile-name').textContent=shownName;$('#profile-email').textContent=email||'Signed in with Privy';$('#profile-avatar').textContent=initials;$('#topbar-avatar').textContent=initials;
+ const input=$('#display-name-input');if(input)input.value=savedProfileName||defaultProfileName(user);
+ if(user)renderProfile();
+}
+function updateUserProfile(user){
+ const previousUserId=currentPrivyUser?.id||null;
+ currentPrivyUser=user||null;
+ window.arusPayCurrentPrivyUserId=currentPrivyUser?.id||null;
+ const identityChanged=previousUserId!==window.arusPayCurrentPrivyUserId;
+ if(identityChanged){
+  profileLoadRequest+=1;
+  savedProfileName='';
+  $('#display-name-form').querySelector('[type=submit]').disabled=false;
+  $('#display-name-status').textContent='';
+ }
+ if(!currentPrivyUser){savedProfileName='';renderUserProfile(null);return}
+ if(identityChanged){
+  const requestId=profileLoadRequest;
+  const userId=currentPrivyUser.id;
+  renderUserProfile(currentPrivyUser);
+  const load=window.arusPayMetadata?.getProfile?.();
+  if(load)void load.then(({profile})=>{if(requestId!==profileLoadRequest||currentPrivyUser?.id!==userId)return;savedProfileName=profile?.display_name||'';renderUserProfile(currentPrivyUser)}).catch(()=>{if(requestId===profileLoadRequest&&currentPrivyUser?.id===userId)$('#display-name-status').textContent='Could not load your saved profile from Supabase. It is not stored on this device.'});
+  return;
+ }
+ renderUserProfile(currentPrivyUser);
+}
 function accountTypeLabel(type){const labels={email:'Email',phone:'Phone',phone_number:'Phone',google_oauth:'Google',twitter_oauth:'X',wallet:'Wallet',discord_oauth:'Discord',github_oauth:'GitHub',apple_oauth:'Apple',farcaster:'Farcaster',telegram:'Telegram',passkey:'Passkey'};return labels[type]||String(type||'Account').replace(/_oauth$/,'').replaceAll('_',' ').replace(/\b\w/g,char=>char.toUpperCase())}
 function accountDisplayValue(account){const value=account.email||account.address||account.phoneNumber||account.username||account.name||'';if(!value)return 'Connected';return account.username&&value===account.username&&!value.startsWith('@')?`@${value}`:value}
 function renderProfile(){const user=currentPrivyUser;if(!user)return;const linked=user.linkedAccounts||[];const list=$('#linked-account-list');const accounts=linked.filter(account=>account&&account.type);list.innerHTML=accounts.length?accounts.map(account=>{const label=accountTypeLabel(account.type);const value=accountDisplayValue(account);const mark=label==='X'?'𝕏':label.slice(0,1).toUpperCase();return `<div class="identity-row"><span class="identity-mark" aria-hidden="true">${escapeHtml(mark)}</span><div class="identity-copy"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(value)}</span></div></div>`}).join(''):'<div class="profile-empty"><strong>No linked account details available</strong>Privy has not returned linked identity details for this session.</div>';const xAccount=linked.find(account=>['twitter_oauth','twitter'].includes(account?.type));$('#x-link-status').textContent=xAccount?(xAccount.username?`Connected as @${xAccount.username}`:'Connected to this Privy account'):'No X account linked yet.';const linkButton=$('#link-x-button');linkButton.disabled=Boolean(xAccount);linkButton.textContent=xAccount?'Connected':'Link X';const wallets=getEmbeddedEvmWallets();const addressList=$('#wallet-address-list'),exportActions=$('#export-wallet-actions');if(wallets.length){addressList.innerHTML=wallets.map((wallet,index)=>{const label=wallets.length>1?`Embedded wallet ${index+1}`:'Embedded wallet';return `<div class="wallet-row"><div class="identity-mark" aria-hidden="true">◈</div><div class="wallet-copy"><strong>${label}</strong><span class="wallet-address mono">${escapeHtml(wallet.address)}</span></div><div class="wallet-actions"><button class="btn btn-quiet btn-sm" data-copy-wallet="${escapeHtml(wallet.address)}" type="button">Copy address</button></div></div>`}).join('');exportActions.innerHTML=wallets.map((wallet,index)=>{const label=wallets.length>1?`Export key for wallet ${index+1}`:'Export private key';return `<div class="wallet-row"><div class="wallet-copy"><strong>${label}</strong><span>Privy will show the key in its own secure modal.</span></div><div class="wallet-actions"><button class="btn btn-quiet btn-sm" data-export-wallet="${escapeHtml(wallet.address)}" type="button">Export key</button></div></div>`}).join('')}else{addressList.innerHTML='<div class="profile-empty"><strong>No Privy embedded EVM wallet found</strong>This Privy account does not currently expose an embedded EVM wallet. Any connected external wallet is shown under linked accounts.</div>';exportActions.innerHTML='<div class="profile-empty"><strong>No Privy embedded wallet available</strong>A private key can only be exported for an embedded wallet linked to this Privy account.</div>'}}
-window.arusPayUserUpdated=user=>{if(currentPrivyUser?.id!==user?.id)window.arusPayApi?.clearInvoices(new URL(window.location.href).searchParams.has('invoiceId'));updateUserProfile(user)};
+window.arusPayUserUpdated=user=>{if(currentPrivyUser?.id!==user?.id){window.arusPayApi?.clearInvoices(new URL(window.location.href).searchParams.has('invoiceId'));window.arusPayApi?.clearPaymentAttemptCache?.()}updateUserProfile(user)};
 const sharedInvoiceLink=(()=>{const params=new URL(window.location.href).searchParams;return params.has('merchant')&&params.has('invoiceId')})();
-window.arusPayAuthenticated=(user,wallets)=>{window.arusPayAuthenticatedState=true;window.arusPayWallets=wallets||[];window.arusPayWalletChanged?.(window.arusPayWallets);updateUserProfile(user);if(!isPrivyAuthenticated){isPrivyAuthenticated=true;navigate(sharedInvoiceLink?'payment':'dashboard');if(!sharedInvoiceLink)showToast('Signed in securely with Privy.')}};
-window.arusPayUnauthenticated=()=>{if(isPrivyAuthenticated)window.arusPayApi?.clearInvoices(new URL(window.location.href).searchParams.has('invoiceId'));window.arusPayAuthenticatedState=false;window.arusPayWallets=[];window.arusPayWalletChanged?.([]);currentPrivyUser=null;if(isPrivyAuthenticated){isPrivyAuthenticated=false;updateUserProfile(null);navigate(sharedInvoiceLink?'payment':'signin');if(!sharedInvoiceLink)showToast('Signed out.')}};
+window.arusPayAuthenticated=(user,wallets)=>{
+ if(currentPrivyUser?.id&&currentPrivyUser.id!==user?.id){window.arusPayApi?.clearInvoices(new URL(window.location.href).searchParams.has('invoiceId'));window.arusPayApi?.clearPaymentAttemptCache?.()}
+ window.arusPayAuthenticatedState=true;window.arusPayWallets=wallets||[];
+ updateUserProfile(user);window.arusPayWalletChanged?.(window.arusPayWallets);
+ if(!isPrivyAuthenticated){isPrivyAuthenticated=true;navigate(sharedInvoiceLink?'payment':'dashboard');if(!sharedInvoiceLink)showToast('Signed in securely with Privy.')}
+};
+window.arusPayUnauthenticated=()=>{
+ if(isPrivyAuthenticated){window.arusPayApi?.clearInvoices(new URL(window.location.href).searchParams.has('invoiceId'));window.arusPayApi?.clearPaymentAttemptCache?.()}
+ window.arusPayAuthenticatedState=false;window.arusPayWallets=[];
+ updateUserProfile(null);window.arusPayWalletChanged?.([]);
+ if(isPrivyAuthenticated){isPrivyAuthenticated=false;navigate(sharedInvoiceLink?'payment':'signin');if(!sharedInvoiceLink)showToast('Signed out.')}
+};
 window.arusPayAuthError=message=>showToast(message);
 $$('[data-nav]').forEach(element=>element.addEventListener('click',event=>{event.preventDefault();const target=element.dataset.nav;if(target==='payment')selectedInvoice=invoices[0]||null;navigate(target)}));
 $$('[data-auth]').forEach(button=>button.addEventListener('click',()=>{if(!window.arusPayPrivy){showToast('Secure sign-in is loading. Try again shortly.');return}window.arusPayPrivy.login(button.dataset.auth)}));
 $('#sign-out').addEventListener('click',()=>window.arusPayPrivy?.logout());
-$('#display-name-form').addEventListener('submit',event=>{event.preventDefault();const name=$('#display-name-input').value.trim();const key=profileStorageKey();if(!key){$('#display-name-status').textContent='Sign in with Privy to save a display name.';return}if(!name){$('#display-name-status').textContent='Enter a display name before saving.';return}try{localStorage.setItem(key,name);$('#display-name-status').textContent='Saved on this device only. It is not synced to a cloud profile.';updateUserProfile(currentPrivyUser);showToast('Display name saved on this device.')}catch{$('#display-name-status').textContent='Could not save this display name in the browser.'}});
+$('#display-name-form').addEventListener('submit',async event=>{
+ event.preventDefault();
+ const name=$('#display-name-input').value.trim();
+ if(!currentPrivyUser){$('#display-name-status').textContent='Sign in with Privy to save a display name.';return}
+ if(!name){$('#display-name-status').textContent='Enter a display name before saving.';return}
+ const userId=currentPrivyUser.id;
+ const requestId=++profileLoadRequest;
+ const isCurrentRequest=()=>currentPrivyUser?.id===userId&&profileLoadRequest===requestId;
+ const button=$('#display-name-form').querySelector('[type=submit]');button.disabled=true;
+ try{
+  const result=await window.arusPayMetadata.saveProfile(name);
+  if(!isCurrentRequest())return;
+  savedProfileName=result?.profile?.display_name||name;
+  updateUserProfile(currentPrivyUser);
+  $('#display-name-status').textContent='Saved to your ArusPay profile in Supabase and synced across devices.';
+  showToast('Profile saved to Supabase.');
+ }catch{
+  if(!isCurrentRequest())return;
+  $('#display-name-status').textContent='Could not sync this profile to Supabase. Please retry.';
+  showToast('Profile could not be saved to Supabase.');
+ }finally{if(isCurrentRequest())button.disabled=false}
+});
 $('#link-x-button').addEventListener('click',()=>{if(!window.arusPayPrivy?.linkTwitter){showToast('X account linking is not available right now.');return}window.arusPayPrivy.linkTwitter()});
 $('#wallet-address-list').addEventListener('click',event=>{const button=event.target.closest('[data-copy-wallet]');if(!button)return;copyWalletAddress(button.dataset.copyWallet)});
 $('#export-wallet-actions').addEventListener('click',event=>{const button=event.target.closest('[data-export-wallet]');if(!button)return;pendingWalletExportAddress=button.dataset.exportWallet;$('#key-export-confirm').classList.remove('hidden');$('#cancel-key-export').focus()});

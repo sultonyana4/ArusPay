@@ -22,7 +22,7 @@ npm install
 npm run dev
 ```
 
-For a hosted development build, set `ARUSPAY_PREVIEW_HOST` to the exact host before starting Vite. It is not needed for localhost.
+Use localhost for development checks. Publish validated changes from `main` only to the fixed production domain `https://aruspay-pi.vercel.app`; do not create hosted preview deployments.
 
 To build and serve a production bundle locally:
 
@@ -41,22 +41,30 @@ Set `VITE_PRIVY_APP_ID` in a local `.env` file to override the public Privy app 
 - Browser requests default to Arc's documented Blockdaemon Testnet endpoint because the primary Testnet RPC blocks browser CORS requests, including from the existing production domain; `VITE_ARUSPAY_BROWSER_RPC_URL` can override this transport without changing the chain or contract.
 - The dashboard reads the connected Privy wallet's native USDC balance with `eth_getBalance` (18 decimals), and syncs the wallet's invoice events from the contract deployment block in ranges below Arc's 10,000-block `eth_getLogs` limit. It then reads each invoice's current contract state. Refreshing is read-only and submits no transaction.
 - `Total received` and `Confirmed payments` include only invoices whose current contract state is `Paid` and whose matching `InvoicePaid` event has the exact amount and merchant. A faucet balance appears only under `Wallet balance`; it is not revenue.
-- A payment link contains only the merchant address and invoice ID. Client name, email, description, and note remain off-chain in the current browser session; no email or backend delivery is configured.
+- A payment link contains only the merchant address and invoice ID. Invoice recipient name, email, description, and due date are off-chain metadata stored in Supabase after the app verifies the successful `InvoiceCreated` receipt and event.
 - `payInvoice(address,bytes32)` submits the exact invoice value as native USDC. The app validates the successful receipt and matching `InvoicePaid` event, then checks the contract state before showing the invoice as paid.
 - The connected wallet pays its own Arc Testnet USDC gas fees. No gas sponsorship, relayer, or token approval is used.
-- Payment state is read from Arc Testnet; a wallet prompt or local record alone is never treated as proof of payment.
+- Payment status is read from Arc Testnet; Supabase metadata, a wallet prompt, and any reported transaction hash are never treated as proof of payment.
 - A Privy linked wallet address is not treated as a connected signing provider. The app waits for Privy's `useWallets` readiness and checks the selected EIP-1193 provider with a read-only `eth_chainId` request; this confirms provider connectivity only, not signing capability.
+
+## Supabase metadata and access
+
+- The existing `profiles` table stores each Privy user's display name. The existing `merchant_invoices` table stores off-chain invoice metadata, keyed to the invoice's Arc chain, contract, merchant, and ID. This metadata is written only after the app verifies contract creation; it never creates or pays an invoice.
+- `payment_attempts` stores only a Privy-user-scoped, wallet-reported submission hint for reconciling an ambiguous payment. It has no payment-status field and is cleared when the app confirms a terminal result from Arc.
+- Browser requests go through the `aruspay-api` Supabase Edge Function. It verifies the Privy ES256 access token and derives the `privy_user_id` from its verified `sub` claim. Before reading or storing invoice metadata, it also verifies a signed Privy identity token and confirms the merchant address is one of that user's linked wallets. Enable **Return user data in an identity token** in Privy under User management → Authentication → Advanced. The Supabase service-role key stays in Edge Function secrets and is never sent to the browser.
+- RLS is enabled on the metadata tables with no direct browser policies. The function returns merchant invoice metadata only to the authenticated Privy owner. The payment-attempt table is isolated by the authenticated payer's Privy identity.
+- The deployed Edge Function allows only the fixed production origin `https://aruspay-pi.vercel.app`; localhost and Vercel preview origins are not allowed. If Supabase is unavailable, Arc reads remain authoritative and the UI reports that cloud metadata could not be loaded or saved.
 
 ## Profile and wallet recovery
 
 - The Profile page uses the authenticated Privy user and linked accounts returned by Privy. It shows a wallet address only when Privy returns an embedded EVM wallet; the address can be copied from the page.
 - The Profile page also shows the authenticated wallet's live native-USDC balance and active address, using the same read-only Arc Testnet balance read as the dashboard; this is separate from invoice revenue.
 - X/Twitter linking uses Privy's authenticated-user account-link flow. It links X to the current Privy user rather than starting a new sign-in flow.
-- Display names are stored in this browser's local storage, scoped to the Privy user ID. There is no backend profile service, so names are not synced to other browsers or devices.
+- Display names are stored in Supabase, scoped to the authenticated Privy user, and sync across devices. They are not stored as durable ArusPay data in browser storage.
 - Private-key export is started only after the user confirms an on-screen safety warning, then handled by Privy's own export modal. ArusPay does not retrieve, receive, log, or store the private key. Anyone who obtains the key can control the wallet.
 - The profile flow performs no on-chain transactions.
 
-Run the safe profile smoke test with `npm run test:profile`. It exercises isolated JSDOM fixtures and mocked Privy methods, including wallet-provider readiness, correct embedded-wallet matching, safe external-provider fallback, account rendering, copy actions, local-only name storage, X-link gating, key-export confirmation/cancel, and empty states. It does not authenticate a real user, test signing, reveal a private key, or send transactions. Live Privy connection, X authorization, and the Privy export modal should be verified from the account owner's own signed-in session.
+Run the profile and metadata regressions with `npm run test:profile` and `npm run test:metadata`. They use isolated JSDOM fixtures and mocked Privy/Supabase calls to check cloud-backed display names, production-only CORS, input validation, access-token forwarding, signed wallet binding, user isolation, and the absence of app-owned local persistence. They do not authenticate a real user, test signing, reveal a private key, or send transactions. Live Privy connection, identity-token availability, X authorization, and the Privy export modal should be verified from the account owner's own signed-in session.
 
 The application must remain testnet-only until a separate, explicit mainnet launch decision and production review.
 
